@@ -1,0 +1,13 @@
+/foo_musicbrainz_db
+/Release
+/x64
+/.vs
+.gitattributes
+/bk
+foo_musicbrainz_db.user
+foo_musicbrainz_db.vcxproj.user
+/packages
+/vcpkg_installed
+packages.config
+vcpkg.json
+/Win32
