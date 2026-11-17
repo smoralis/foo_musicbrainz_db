@@ -1,6 +1,8 @@
 #include "stdafx.h"
 #include "provider.h"
 #include "debug_log.h"
+#include "lookup_queue.h"
+#include "bg_tasks.h"
 
 namespace {
 std::mutex g_provider_mutex;
@@ -49,6 +51,8 @@ public:
 
     void on_quit() override {
         musicbrainz_client_abort();
+        mbdb_lookup_queue_shutdown();
+        mbdb_bg_shutdown();
         MBDB_LOG("on_quit: releasing provider");
         std::lock_guard<std::mutex> lock(g_provider_mutex);
         g_provider.reset();

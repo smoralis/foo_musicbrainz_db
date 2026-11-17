@@ -41,11 +41,17 @@
     <CharacterSet>Unicode</CharacterSet>
   </PropertyGroup>
   <PropertyGroup Label="Configuration" Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
+    <ConfigurationType>DynamicLibrary</ConfigurationType>
+    <UseDebugLibraries>true</UseDebugLibraries>
     <PlatformToolset>v143</PlatformToolset>
+    <CharacterSet>Unicode</CharacterSet>
   </PropertyGroup>
   <PropertyGroup Label="Configuration" Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
-    <PlatformToolset>v143</PlatformToolset>
     <ConfigurationType>DynamicLibrary</ConfigurationType>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <PlatformToolset>v143</PlatformToolset>
+    <WholeProgramOptimization>true</WholeProgramOptimization>
+    <CharacterSet>Unicode</CharacterSet>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
   <PropertyGroup>
@@ -60,18 +66,10 @@
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp17</LanguageStandard>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
-      <AdditionalIncludeDirectories>
-    $(ProjectDir)include;
-    $(ProjectDir)src;
-    $(ProjectDir)..\;
-    $(ProjectDir)..\SDK;
-    $(ProjectDir)..\helpers;
-    $(ProjectDir)..\..\;
-    $(ProjectDir)..\..\pfc;
-    $(ProjectDir)..\..\libPPUI;
-    %(AdditionalIncludeDirectories)
-</AdditionalIncludeDirectories>
-      <PreprocessorDefinitions>WIN32;_WINDOWS;_USRDLL;NDEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>$(ProjectDir)include;$(ProjectDir)src;$(ProjectDir)..\;$(ProjectDir)..\SDK;$(ProjectDir)..\helpers;$(ProjectDir)..\..\;$(ProjectDir)..\..\pfc;$(ProjectDir)..\..\libPPUI;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>
+        WIN32;_WINDOWS;_USRDLL;UNICODE;_UNICODE;%(PreprocessorDefinitions)
+      </PreprocessorDefinitions>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -79,20 +77,44 @@
       <AdditionalLibraryDirectories>
         $(VcpkgInstalledDir)lib;%(AdditionalLibraryDirectories)
       </AdditionalLibraryDirectories>
-      <AdditionalDependencies>
-        sqlite3.lib;winhttp.lib;$(ProjectDir)..\shared\shared-$(Platform).lib;%(AdditionalDependencies)
-      </AdditionalDependencies>
+      <AdditionalDependencies>sqlite3.lib;winhttp.lib;$(ProjectDir)..\shared\shared-$(Platform).lib;$(ProjectDir)..\..\columns_ui-sdk\$(Platform)\Release\columns_ui_sdk.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)'=='Debug'">
+    <ClCompile>
+      <PreprocessorDefinitions>_DEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)'=='Release'">
+    <ClCompile>
+      <PreprocessorDefinitions>NDEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="src\main.cpp" />
     <ClCompile Include="src\debug_log.cpp" />
+    <ClCompile Include="src\preferences.cpp" />
     <ClCompile Include="src\initquit.cpp" />
     <ClCompile Include="src\playback_monitor.cpp" />
     <ClCompile Include="src\database.cpp" />
     <ClCompile Include="src\json_exporter.cpp" />
     <ClCompile Include="src\musicbrainz_client.cpp" />
     <ClCompile Include="src\provider.cpp" />
+    <ClCompile Include="src\activity.cpp" />
+    <ClCompile Include="src\activity_window.cpp" />
+    <ClCompile Include="src\activity_dui.cpp" />
+    <ClCompile Include="src\activity_cui.cpp" />
+    <ClCompile Include="src\activity_artists.cpp" />
+    <ClCompile Include="src\artist_table.cpp" />
+    <ClCompile Include="src\bg_tasks.cpp" />
+    <ClCompile Include="src\contextmenu.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ResourceCompile Include="src\preferences.rc" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="src\preferences.h" />
+    <ClInclude Include="src\resource.h" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\foobar2000_component_client\foobar2000_component_client.vcxproj" />

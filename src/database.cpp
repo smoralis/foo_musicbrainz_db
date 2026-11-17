@@ -52,13 +52,10 @@ bool musicbrainz_database::initialize() {
             return false;
         }
     }
-    // Schema version for other components/tools reading this file
-    // (PRAGMA user_version). Bump it on any breaking schema change.
-    if (sqlite3_exec(m_db, "PRAGMA user_version=1;", nullptr, nullptr, nullptr) != SQLITE_OK)
-        MBDB_LOG("sqlite: could not set schema version: %s", sqlite3_errmsg(m_db));
     return true;
 }
 bool musicbrainz_database::save_artist(const artist_record& a) {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
     if (!m_db || a.mbid.empty()) return false;
     const char* sql = R"SQL(
         INSERT INTO artists(mbid,name,type,country,area,begin_area,end_area,
@@ -84,6 +81,7 @@ bool musicbrainz_database::save_artist(const artist_record& a) {
     return ok;
 }
 bool musicbrainz_database::get_artist(const std::string& mbid, artist_record& a) {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
     if (!m_db) return false;
     const char* sql = "SELECT mbid,name,type,country,area,begin_area,end_area,"
                       "begin_date,end_date,disambiguation,json FROM artists WHERE mbid=?";
@@ -106,4 +104,94 @@ bool musicbrainz_database::get_artist(const std::string& mbid, artist_record& a)
     }
     sqlite3_finalize(s);
     return found;
+}
+long long musicbrainz_database::count_artists() {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    if (!m_db) return -1;
+    sqlite3_stmt* s = nullptr;
+    if (sqlite3_prepare_v2(m_db, "SELECT COUNT(*) FROM artists", -1, &s, nullptr) != SQLITE_OK) return -1;
+    long long n = -1;
+    if (sqlite3_step(s) == SQLITE_ROW) n = sqlite3_column_int64(s, 0);
+    sqlite3_finalize(s);
+    return n;
+}
+bool musicbrainz_database::list_artists(std::vector<artist_list_item>& out) {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    out.clear();
+    if (!m_db) return false;
+    sqlite3_stmt* s = nullptr;
+    if (sqlite3_prepare_v2(m_db, "SELECT mbid,name,country,type FROM artists ORDER BY name COLLATE NOCASE",
+        -1, &s, nullptr) != SQLITE_OK) return false;
+    auto get = [&](int i) -> std::string {
+        auto p = sqlite3_column_text(s, i);
+        return p ? reinterpret_cast<const char*>(p) : "";
+    };
+    while (sqlite3_step(s) == SQLITE_ROW) {
+        artist_list_item item;
+        item.mbid = get(0); item.name = get(1); item.country = get(2); item.type = get(3);
+        out.push_back(std::move(item));
+    }
+    sqlite3_finalize(s);
+    return true;
+}
+
+size_t musicbrainz_database::delete_artists(const std::vector<std::string>& mbids) {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    if (!m_db || mbids.empty()) return 0;
+    if (sqlite3_exec(m_db, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr) != SQLITE_OK) {
+        MBDB_LOG("sqlite: delete_artists could not start a transaction: %s", sqlite3_errmsg(m_db));
+        return 0;
+    }
+    sqlite3_stmt* s = nullptr;
+    if (sqlite3_prepare_v2(m_db, "DELETE FROM artists WHERE mbid=?", -1, &s, nullptr) != SQLITE_OK) {
+        MBDB_LOG("sqlite: delete_artists prepare failed: %s", sqlite3_errmsg(m_db));
+        sqlite3_exec(m_db, "ROLLBACK", nullptr, nullptr, nullptr);
+        return 0;
+    }
+    size_t deleted = 0;
+    for (const auto& id : mbids) {
+        sqlite3_reset(s);
+        sqlite3_clear_bindings(s);
+        sqlite3_bind_text(s, 1, id.c_str(), -1, SQLITE_TRANSIENT);
+        if (sqlite3_step(s) == SQLITE_DONE) deleted += static_cast<size_t>(sqlite3_changes(m_db));
+    }
+    sqlite3_finalize(s);
+    if (sqlite3_exec(m_db, "COMMIT", nullptr, nullptr, nullptr) != SQLITE_OK) {
+        MBDB_LOG("sqlite: delete_artists commit failed: %s", sqlite3_errmsg(m_db));
+        sqlite3_exec(m_db, "ROLLBACK", nullptr, nullptr, nullptr);
+        return 0;
+    }
+    MBDB_LOG("sqlite: deleted %zu of %zu requested artist(s)", deleted, mbids.size());
+    return deleted;
+}
+
+bool musicbrainz_database::get_artist_jsons(const std::vector<std::string>& mbids,
+        std::vector<std::pair<std::string, std::string>>& out) {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    out.clear();
+    if (!m_db) return false;
+    sqlite3_stmt* s = nullptr;
+    auto text = [&](int i) -> std::string {
+        auto p = sqlite3_column_text(s, i);
+        return p ? reinterpret_cast<const char*>(p) : "";
+    };
+    if (mbids.empty()) {
+        if (sqlite3_prepare_v2(m_db, "SELECT mbid,json FROM artists WHERE json IS NOT NULL AND json<>'' "
+            "ORDER BY name COLLATE NOCASE", -1, &s, nullptr) != SQLITE_OK) return false;
+        while (sqlite3_step(s) == SQLITE_ROW) out.emplace_back(text(0), text(1));
+        sqlite3_finalize(s);
+        return true;
+    }
+    if (sqlite3_prepare_v2(m_db, "SELECT json FROM artists WHERE mbid=?", -1, &s, nullptr) != SQLITE_OK) return false;
+    for (const auto& id : mbids) {
+        sqlite3_reset(s);
+        sqlite3_clear_bindings(s);
+        sqlite3_bind_text(s, 1, id.c_str(), -1, SQLITE_TRANSIENT);
+        if (sqlite3_step(s) == SQLITE_ROW) {
+            std::string j = text(0);
+            if (!j.empty()) out.emplace_back(id, std::move(j));
+        }
+    }
+    sqlite3_finalize(s);
+    return true;
 }

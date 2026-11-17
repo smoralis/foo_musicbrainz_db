@@ -1,5 +1,6 @@
 #include "musicbrainz_client.h"
 #include "debug_log.h"
+#include "activity.h"
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
@@ -40,7 +41,7 @@ constexpr size_t kMaxResponse=10u*1024u*1024u;
 // MusicBrainz allows an average of 1 request/second per client and answers
 // excess traffic with 503 (+ Retry-After). Stay safely under that.
 using mb_clock = std::chrono::steady_clock;
-constexpr std::chrono::milliseconds kMinInterval(1100);
+constexpr std::chrono::milliseconds kMinInterval(2000);
 constexpr int kMaxRetries = 2;          // retries after a 503/429
 constexpr int kDefaultBackoffSec = 5;   // used when no Retry-After header is sent
 constexpr int kMaxBackoffSec = 60;
@@ -107,8 +108,8 @@ std::string encode(const std::string& s) {
 }
 // One HTTP attempt. On failure `status` holds the HTTP status (0 if none) and
 // `retry_after` the Retry-After seconds when the server sent one.
-static bool http_request(const std::wstring& path,std::string& response,
-                         DWORD& status,int& retry_after) {
+static bool http_request_impl(const std::wstring& path,std::string& response,
+                              DWORD& status,int& retry_after) {
     status=0; retry_after=0;
     MBDB_LOG("http GET https://musicbrainz.org%ls", path.c_str());
     HINTERNET session=WinHttpOpen(
@@ -154,6 +155,14 @@ static bool http_request(const std::wstring& path,std::string& response,
     MBDB_LOG("http: %s (status %lu, %lu bytes, retry-after %d, last error %lu)", ok?"ok":"FAILED",
         status, static_cast<unsigned long>(response.size()), retry_after, ok?0ul:GetLastError());
     WinHttpCloseHandle(req); WinHttpCloseHandle(conn); WinHttpCloseHandle(session);
+    return ok;
+}
+static bool http_request(const std::wstring& path,std::string& response,
+                         DWORD& status,int& retry_after) {
+    const auto t0=std::chrono::steady_clock::now();
+    const bool ok=http_request_impl(path,response,status,retry_after);
+    mbdb_activity::http_done(status,ok,std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now()-t0).count());
     return ok;
 }
 bool musicbrainz_client::http_get(const std::wstring& path,std::string& response) {

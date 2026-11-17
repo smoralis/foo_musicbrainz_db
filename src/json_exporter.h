@@ -2,6 +2,7 @@
 #include <filesystem>
 #include <mutex>
 #include <string>
+#include <vector>
 #include <nlohmann/json.hpp>
 #include "../include/musicbrainz_db_types.h"
 
@@ -18,6 +19,8 @@ class json_exporter {
 public:
     explicit json_exporter(const std::filesystem::path& root);
     bool export_artist(const artist_record& artist);
+    // Removes the artists from every JSON file (used when deleting from the panel).
+    bool remove_artists(const std::vector<std::string>& mbids);
 private:
     enum store_id { kAll, kBasic, kCountry, kGenres, kRelations, kTags, kStoreCount };
     struct store {
@@ -29,7 +32,8 @@ private:
     std::mutex m_mutex;
     store m_stores[kStoreCount];
 
-    // Caller holds m_mutex.
+    // Caller holds m_mutex. Both may throw (json parse errors).
+    bool ensure_loaded(store& s);
     bool update_store(store& s, const std::string& mbid, nlohmann::json value);
     bool write_atomic(const std::filesystem::path&, const std::string&);
     static bool valid_mbid(const std::string&);

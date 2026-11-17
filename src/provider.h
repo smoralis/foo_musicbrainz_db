@@ -1,5 +1,8 @@
 #pragma once
 #include <memory>
+#include <string>
+#include <utility>
+#include <vector>
 #include "database.h"
 #include "musicbrainz_client.h"
 #include "json_exporter.h"
@@ -14,6 +17,12 @@ public:
     bool ensure_artist(const char* artist_mbid);
     bool get_artist_country(const char*,std::string&) override;
     bool get_artist_json(const char*,std::string&) override;
+
+    // Artist table (panel).
+    bool list_artists(std::vector<artist_list_item>& out);
+    size_t delete_artists(const std::vector<std::string>& mbids); // database + JSON files
+    bool get_artist_jsons(const std::vector<std::string>& mbids,
+                          std::vector<std::pair<std::string,std::string>>& out);
 private:
     bool load_artist(const std::string& mbid, artist_record& artist);
     musicbrainz_database m_database;

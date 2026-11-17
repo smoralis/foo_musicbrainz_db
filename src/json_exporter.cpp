@@ -43,23 +43,47 @@ bool json_exporter::write_atomic(const fs::path& path,const std::string& data) {
     if(ec) { fs::remove(tmp,ec); return false; }
     return true;
 }
+bool json_exporter::ensure_loaded(store& st) {
+    if(st.loaded) return true;
+    // Load the existing file once. If it is unreadable or corrupt we refuse to
+    // write, so a good file is never overwritten with a partial one.
+    json existing=json::object();
+    std::error_code ec;
+    if(fs::exists(st.file,ec)) {
+        std::ifstream f(st.file,std::ios::binary);
+        if(!f) { MBDB_LOG("export: cannot open %s", st.file.u8string().c_str()); return false; }
+        existing=json::parse(f);
+        if(!existing.is_object()) { MBDB_LOG("export: %s is not a json object, refusing to overwrite", st.file.u8string().c_str()); return false; }
+    }
+    st.data=std::move(existing);
+    st.loaded=true;
+    MBDB_LOG("export: loaded %zu record(s) from %s", st.data.size(), st.file.u8string().c_str());
+    return true;
+}
+
+bool json_exporter::remove_artists(const std::vector<std::string>& mbids) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    bool ok=true;
+    for(auto& st:m_stores) {
+        try {
+            if(!ensure_loaded(st)) { ok=false; continue; }
+            size_t removed=0;
+            for(const auto& id:mbids) removed+=st.data.erase(id);
+            if(removed==0) continue;
+            const bool wrote=write_atomic(st.file,st.data.dump(2,' ',false,json::error_handler_t::replace));
+            MBDB_LOG("export: removed %zu record(s) from %s (%s)", removed, st.file.u8string().c_str(), wrote?"ok":"FAILED writing");
+            ok=wrote&&ok;
+        } catch(const std::exception& e) {
+            MBDB_LOG("export: error removing from %s: %s", st.file.u8string().c_str(), e.what());
+            ok=false;
+        }
+    }
+    return ok;
+}
+
 bool json_exporter::update_store(store& st, const std::string& mbid, json value) {
     try {
-        if(!st.loaded) {
-            // Load the existing file once. If it is unreadable or corrupt we refuse to
-            // write, so a good file is never overwritten with a partial one.
-            json existing=json::object();
-            std::error_code ec;
-            if(fs::exists(st.file,ec)) {
-                std::ifstream f(st.file,std::ios::binary);
-                if(!f) { MBDB_LOG("export: cannot open %s", st.file.u8string().c_str()); return false; }
-                existing=json::parse(f);
-                if(!existing.is_object()) { MBDB_LOG("export: %s is not a json object, refusing to overwrite", st.file.u8string().c_str()); return false; }
-            }
-            st.data=std::move(existing);
-            st.loaded=true;
-            MBDB_LOG("export: loaded %zu record(s) from %s", st.data.size(), st.file.u8string().c_str());
-        }
+        if(!ensure_loaded(st)) return false;
         st.data[mbid]=std::move(value);
         const bool ok=write_atomic(st.file,st.data.dump(2,' ',false,json::error_handler_t::replace));
         MBDB_LOG("export: %s %s (%zu record(s))", ok?"wrote":"FAILED writing", st.file.u8string().c_str(), st.data.size());
