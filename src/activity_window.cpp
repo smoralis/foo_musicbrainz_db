@@ -247,6 +247,15 @@ LRESULT activity_window::OnLButtonDown(UINT, WPARAM, LPARAM lp, BOOL& handled) {
     return 0;
 }
 
+// A double-click on an artist row opens its info window. Anywhere else the second
+// click of a double-click is handled like an ordinary press, as before the panel
+// had a double-click action, so quick repeated clicks on buttons and tabs still work.
+LRESULT activity_window::OnLButtonDblClk(UINT, WPARAM, LPARAM lp, BOOL& handled) {
+    const POINT pt = { GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+    if (artists_dbl_click(pt)) return 0;
+    return OnLButtonDown(WM_LBUTTONDOWN, 0, lp, handled);
+}
+
 LRESULT activity_window::OnLButtonUp(UINT, WPARAM, LPARAM lp, BOOL& handled) {
     if (m_down < 0) { handled = FALSE; return 0; }
     const int down = m_down;
@@ -280,6 +289,24 @@ void activity_window::copy_events() {
         }
     }
     CloseClipboard();
+}
+
+// In DUI layout edit mode the host selects elements by clicking them. Report the
+// panel as transparent to hit testing so those clicks go to the host instead.
+LRESULT activity_window::OnNcHitTest(UINT, WPARAM, LPARAM, BOOL& handled) {
+    if (m_host && m_host->is_edit_mode()) return HTTRANSPARENT;
+    handled = FALSE;
+    return 0;
+}
+
+// The artists-tab search box is a child window and would still swallow clicks in
+// edit mode, so hide it while editing and restore it afterwards.
+void activity_window::on_edit_mode_changed() {
+    if (m_search.IsWindow()) {
+        const bool editing = m_host && m_host->is_edit_mode();
+        m_search.ShowWindow(editing || m_view != 1 ? SW_HIDE : SW_SHOW);
+    }
+    Invalidate();
 }
 
 LRESULT activity_window::OnContextMenu(UINT, WPARAM, LPARAM lp, BOOL&) {

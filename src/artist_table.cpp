@@ -16,6 +16,12 @@ bool mbdb_artist_list(std::vector<artist_list_item>& out) {
     return provider&&provider->list_artists(out);
 }
 
+bool mbdb_artist_get(const std::string& mbid, artist_record& out) {
+    out=artist_record();
+    auto provider=musicbrainz_db_get_provider();
+    return provider&&provider->get_stored_artist(mbid,out);
+}
+
 size_t mbdb_artist_delete(const std::vector<std::string>& mbids) {
     auto provider=musicbrainz_db_get_provider();
     return provider?provider->delete_artists(mbids):0;

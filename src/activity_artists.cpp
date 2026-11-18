@@ -1,6 +1,7 @@
 // The panel's "Artists" tab: a table of the artists in the database with
 // multi-select, delete and JSON export.
 #include "activity_window.h"
+#include "artist_info_window.h"
 #include "activity.h"
 #include "activity_util.h"
 #include "artist_table.h"
@@ -286,6 +287,17 @@ bool activity_window::artists_mouse_down(POINT pt) {
         return true;
     }
     return false;
+}
+
+bool activity_window::artists_dbl_click(POINT pt) {
+    if (m_view != 1 || m_row_h <= 0 || !PtInRect(&m_list_rc, pt)) return false;
+    const size_t pos = m_ascroll + static_cast<size_t>((pt.y - m_list_rc.top) / m_row_h);
+    if (pos >= m_order.size()) return false;
+    const size_t id = m_order[pos];
+    if (id >= m_rows.size()) return false;
+    const artist_list_item item = m_rows[id]; // copy: the window can outlive a list reload
+    mbdb_show_artist_info(item);
+    return true;
 }
 
 void activity_window::artists_wheel(int steps) {

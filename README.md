@@ -2,7 +2,6 @@
 
 A foobar2000 component that quietly builds and maintains a local MusicBrainz artist database while you listen. It looks up artists when tracks start or when radio streams publish new track metadata, then caches complete artist records in SQLite and exports them to JSON files.
 
-**Version:** 0.1.1
 
 ## Features
 
@@ -39,6 +38,7 @@ The window follows the host's light/dark colours and font where available. It ha
 
 The Artists tab supports standard multi-selection (Ctrl-click and Shift-click), keyboard navigation, and these actions:
 
+- **View artist details.** Double-click an artist row to open a dedicated, modeless information window. The window presents the stored MusicBrainz record in readable sections: artist details, location and activity, identifiers (ISNI/IPI), music profile (rating, genres and tags), and annotation. It also includes the complete raw JSON with syntax highlighting. Only one information window is opened per artist; double-clicking that artist again brings its existing window to the front. 																																																																																																																																							   
 - **Delete selected** (Delete key or context menu). Removes the selected artist records from SQLite and the corresponding entries in the component's JSON repository.
 - **Export selected/all full records.** Saves the complete stored MusicBrainz artist JSON as an object keyed by MBID.
 - **Export selected/all list.** Saves a JSON array with each artist's `mbid`, `name`, `country` and `type`.
@@ -169,3 +169,5 @@ MIT License
 ![Alt text](/screenshot1.png?raw=true "screenshot1")
 
 ![Alt text](/screenshot2.png?raw=true "screenshot2")
+
+![Alt text](/screenshot3.png?raw=true "screenshot3")

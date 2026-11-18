@@ -18,7 +18,7 @@ BEGIN
     EDITTEXT        IDC_ARTIST_FIELD, 72, 88, 180, 13, ES_AUTOHSCROLL
     LTEXT           "&Title field:", IDC_STATIC, 12, 108, 56, 8
     EDITTEXT        IDC_TITLE_FIELD, 72, 106, 180, 13, ES_AUTOHSCROLL
-    LTEXT           "Example: $if(%inverted%,%title%,%artist%)",
+    LTEXT           "Examples: %album artist%   $if2(%artist%,%album artist%)   %title%",
                     IDC_STATIC, 12, 124, 240, 18
     LTEXT           "", IDC_FIELDS_STATUS, 12, 146, 240, 10
 
@@ -26,4 +26,20 @@ BEGIN
     LTEXT           "&Delay search by:", IDC_STATIC, 12, 178, 64, 8
     EDITTEXT        IDC_DYNAMIC_DELAY, 78, 176, 30, 13, ES_AUTOHSCROLL | ES_NUMBER
     LTEXT           "seconds (0 = search immediately)", IDC_STATIC, 114, 178, 138, 8
+END
+
+// Modeless window opened by double-clicking an artist in the panel's artists tab.
+IDD_MBDB_ARTIST_INFO DIALOGEX 0, 0, 300, 220
+STYLE DS_SETFONT | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME | WS_MINIMIZEBOX
+EXSTYLE WS_EX_TOOLWINDOW
+CAPTION "Artist info"
+FONT 9, "Segoe UI", 0, 0, 0x0
+BEGIN
+    CONTROL "", IDC_INFO_TEXT, "RICHEDIT50W",
+            ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL |
+            WS_VSCROLL | WS_TABSTOP,
+            6, 6, 288, 190
+
+    PUSHBUTTON      "Show Raw JSON", IDC_RAW_JSON, 164, 202, 74, 14
+    DEFPUSHBUTTON   "Close", IDCANCEL, 244, 202, 50, 14
 END

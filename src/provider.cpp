@@ -63,7 +63,7 @@ bool musicbrainz_db_provider::search_artist_title(const char* artist,
     }
     artist_record a;
     if(!load_artist(mbid,a)) { mbid.clear(); return false; }
-    MBDB_LOG("search: done, artist mbid %s => '%s'", mbid.c_str() , artist);
+    MBDB_LOG("search: done, artist mbid %s", mbid.c_str());
     return true;
 }
 bool musicbrainz_db_provider::ensure_artist(const char* mbid) {
@@ -89,6 +89,10 @@ bool musicbrainz_db_provider::get_artist_json(const char* mbid,
     if(!load_artist(mbid,a)) return false;
     out=a.raw_json; // full MusicBrainz response
     return !out.empty();
+}
+
+bool musicbrainz_db_provider::get_stored_artist(const std::string& mbid, artist_record& out) {
+    return m_database.get_artist(mbid,out);
 }
 
 bool musicbrainz_db_provider::list_artists(std::vector<artist_list_item>& out) {

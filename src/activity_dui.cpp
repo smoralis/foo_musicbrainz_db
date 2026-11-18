@@ -92,6 +92,14 @@ namespace
             t_size
         ) override
         {
+            if (what == ui_element_notify_edit_mode_changed)
+            {
+                if (m_window.IsWindow())
+                {
+                    m_window.on_edit_mode_changed();
+                }
+            }
+
             if (what == ui_element_notify_colors_changed ||
                 what == ui_element_notify_font_changed)
             {
@@ -129,6 +137,11 @@ namespace
             }
 
             return true;
+        }
+
+        bool is_edit_mode() override
+        {
+            return m_callback.is_valid() && m_callback->is_edit_mode_enabled();
         }
 
         HFONT query_font() override

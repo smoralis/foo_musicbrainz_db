@@ -20,6 +20,8 @@ public:
 
     // Artist table (panel).
     bool list_artists(std::vector<artist_list_item>& out);
+    // The stored record for one artist (false when not stored or stored without full JSON).
+    bool get_stored_artist(const std::string& mbid, artist_record& out);
     size_t delete_artists(const std::vector<std::string>& mbids); // database + JSON files
     bool get_artist_jsons(const std::vector<std::string>& mbids,
                           std::vector<std::pair<std::string,std::string>>& out);

@@ -22,6 +22,9 @@ public:
     virtual bool query_colours(COLORREF& background, COLORREF& text) = 0;
     // The host's preferred font, or nullptr for the default GUI font. Not owned.
     virtual HFONT query_font() = 0;
+    // True while the host is in layout edit mode (Default UI). In that mode the
+    // panel must not take mouse input so the host can select and move it.
+    virtual bool is_edit_mode() { return false; }
 };
 
 // Owner-drawn panel showing database statistics and a live event feed. Used by
@@ -37,6 +40,7 @@ public:
 
     void set_host(activity_host* host) { m_host = host; }
     void refresh_theme(); // call when the host reports colour/font changes
+    void on_edit_mode_changed(); // call when the host's layout edit mode is toggled
 
     BEGIN_MSG_MAP(activity_window)
         MESSAGE_HANDLER(WM_CREATE, OnCreate)
@@ -56,9 +60,11 @@ public:
         MESSAGE_HANDLER(WM_MOUSELEAVE, OnMouseLeave)
         MESSAGE_HANDLER(WM_LBUTTONDOWN, OnLButtonDown)
         MESSAGE_HANDLER(WM_LBUTTONUP, OnLButtonUp)
+        MESSAGE_HANDLER(WM_LBUTTONDBLCLK, OnLButtonDblClk)
         MESSAGE_HANDLER(WM_SYSCOLORCHANGE, OnThemeMessage)
         MESSAGE_HANDLER(WM_SETTINGCHANGE, OnThemeMessage)
         MESSAGE_HANDLER(WM_CONTEXTMENU, OnContextMenu)
+        MESSAGE_HANDLER(WM_NCHITTEST, OnNcHitTest)
     END_MSG_MAP()
 
 private:
@@ -78,8 +84,10 @@ private:
     LRESULT OnMouseLeave(UINT, WPARAM, LPARAM, BOOL&);
     LRESULT OnLButtonDown(UINT, WPARAM, LPARAM, BOOL&);
     LRESULT OnLButtonUp(UINT, WPARAM, LPARAM, BOOL&);
+    LRESULT OnLButtonDblClk(UINT, WPARAM, LPARAM, BOOL&);
     LRESULT OnThemeMessage(UINT, WPARAM, LPARAM, BOOL&);
     LRESULT OnContextMenu(UINT, WPARAM, LPARAM, BOOL&);
+    LRESULT OnNcHitTest(UINT, WPARAM, LPARAM, BOOL&);
 
     bool update_theme(); // returns true if anything changed
     void paint(HDC dc, const RECT& rc);
@@ -94,6 +102,7 @@ private:
     void draw_button(HDC dc, int index, const std::wstring& label);
     bool tab_mouse_down(POINT pt);
     bool artists_mouse_down(POINT pt);
+    bool artists_dbl_click(POINT pt);     // opens the artist info window
     void artists_wheel(int steps);
     void artists_context_menu(POINT screen_pt);
     void reload_artists();   // asks the background thread for a fresh list

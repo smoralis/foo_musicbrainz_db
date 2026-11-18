@@ -66,7 +66,7 @@
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp17</LanguageStandard>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
-      <AdditionalIncludeDirectories>$(ProjectDir)include;$(ProjectDir)src;$(ProjectDir)..\;$(ProjectDir)..\SDK;$(ProjectDir)..\helpers;$(ProjectDir)..\..\;$(ProjectDir)..\..\pfc;$(ProjectDir)..\..\libPPUI;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)include;$(ProjectDir)src;$(ProjectDir)..\;$(ProjectDir)..\SDK;$(ProjectDir)..\helpers;$(ProjectDir)..\..\;$(ProjectDir)..\..\pfc;$(ProjectDir)..\columns_ui-sdk;$(ProjectDir)..\..\libPPUI;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <PreprocessorDefinitions>
         WIN32;_WINDOWS;_USRDLL;UNICODE;_UNICODE;%(PreprocessorDefinitions)
       </PreprocessorDefinitions>
@@ -94,6 +94,7 @@
     <ClCompile Include="src\main.cpp" />
     <ClCompile Include="src\debug_log.cpp" />
     <ClCompile Include="src\preferences.cpp" />
+    <ClCompile Include="src\artist_info_window.cpp" />
     <ClCompile Include="src\initquit.cpp" />
     <ClCompile Include="src\playback_monitor.cpp" />
     <ClCompile Include="src\database.cpp" />
@@ -114,6 +115,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="src\preferences.h" />
+    <ClInclude Include="src\artist_info_window.h" />
     <ClInclude Include="src\resource.h" />
   </ItemGroup>
   <ItemGroup>
