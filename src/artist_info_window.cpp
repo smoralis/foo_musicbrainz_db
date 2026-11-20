@@ -1,4 +1,5 @@
 #include "stdafx.h"
+#include "ui_font.h"
 
 #include <helpers/DarkMode.h>
 #include <nlohmann/json.hpp>
@@ -6,6 +7,8 @@
 #include <algorithm>
 #include <functional>
 #include <map>
+#include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 #include <utility>
@@ -16,7 +19,9 @@
 #include <shellapi.h>
 
 #include "artist_info_window.h"
+#include "artist_info_view.h"
 #include "artist_table.h"
+#include "bg_tasks.h"
 #include "resource.h"
 #include <uxtheme.h>
 
@@ -644,16 +649,238 @@ namespace {
         return content;
     }
 
+    // ------------------------------------------------------------- shared rendering --
+    // Used by the info dialog and by the activity panel's "Now playing" tab.
+
+    // Face and size of the body text (headings are 20% larger). Taken from the host
+    // UI's font so the info views follow Default UI / Columns UI font settings.
+    struct info_font {
+        std::wstring face = L"Segoe UI";
+        LONG twips = 200; // 10 pt
+        bool bold = false;
+        bool italic = false;
+        BYTE charset = DEFAULT_CHARSET;
+    };
+
+    info_font describe_font(HFONT font) {
+        info_font f;
+        if (!font) return f;
+
+        LOGFONTW lf{};
+        if (!::GetObjectW(font, sizeof(lf), &lf)) return f;
+
+        // Em height from the real metrics, so positive (cell) and negative (character)
+        // LOGFONT heights both give the right size.
+        if (HDC dc = ::GetDC(nullptr)) {
+            HGDIOBJ old = ::SelectObject(dc, font);
+            TEXTMETRICW tm{};
+            if (::GetTextMetricsW(dc, &tm)) {
+                const int dpi = ::GetDeviceCaps(dc, LOGPIXELSY);
+                const int em = tm.tmHeight - tm.tmInternalLeading;
+                if (em > 0 && dpi > 0) f.twips = ::MulDiv(em, 1440, dpi);
+            }
+            ::SelectObject(dc, old);
+            ::ReleaseDC(nullptr, dc);
+        }
+
+        if (lf.lfFaceName[0]) f.face = lf.lfFaceName;
+        f.bold = lf.lfWeight >= FW_BOLD;
+        f.italic = lf.lfItalic != 0;
+        f.charset = lf.lfCharSet;
+        return f;
+    }
+
+    struct info_theme {
+        COLORREF background, text, heading, link;
+        COLORREF json_key, json_string, json_number, json_literal;
+        info_font font;
+    };
+
+    info_theme make_theme(bool dark) {
+        info_theme t{};
+        t.font = describe_font(mbdb_ui_default_font()); // the active UI's font; Segoe UI if unknown
+
+        if (dark) {
+            t.background = RGB(30, 30, 30);
+            t.text = RGB(220, 220, 220);
+            t.heading = RGB(130, 180, 240);
+            t.link = RGB(100, 175, 255);
+            t.json_key = RGB(156, 220, 150);
+            t.json_string = RGB(206, 145, 120);
+            t.json_number = RGB(181, 206, 168);
+            t.json_literal = RGB(197, 134, 192);
+        }
+        else {
+            t.background = RGB(255, 255, 255);
+            t.text = RGB(35, 35, 35);
+            t.heading = RGB(50, 115, 190);
+            t.link = RGB(35, 115, 205);
+            t.json_key = RGB(0, 0, 255);
+            t.json_string = RGB(163, 21, 21);
+            t.json_number = RGB(9, 134, 88);
+            t.json_literal = RGB(128, 0, 128);
+        }
+
+        return t;
+    }
+
+    void format_document(HWND edit, const rich_document& doc, const info_theme& t) {
+        const LONG text_length = static_cast<LONG>(doc.text.length());
+        if (text_length <= 0) return;
+
+        // Base format for the whole document first.
+        CHARFORMAT2W base{};
+        base.cbSize = sizeof(base);
+        base.dwMask = CFM_COLOR | CFM_SIZE | CFM_FACE | CFM_CHARSET | CFM_BOLD | CFM_ITALIC | CFM_UNDERLINE | CFM_LINK;
+        base.dwEffects = (t.font.bold ? CFE_BOLD : 0) | (t.font.italic ? CFE_ITALIC : 0);
+        base.yHeight = t.font.twips;
+        base.bCharSet = t.font.charset;
+        base.crTextColor = t.text;
+        wcsncpy_s(base.szFaceName, t.font.face.c_str(), _TRUNCATE);
+
+        set_rich_selection(edit, 0, text_length);
+        ::SendMessageW(edit, EM_SETCHARFORMAT, SCF_SELECTION, reinterpret_cast<LPARAM>(&base));
+
+        // Then each range with its own mask and colour.
+        for (const auto& r : doc.ranges) {
+            if (r.start < 0 || r.end <= r.start || r.end > text_length) {
+                continue;
+            }
+
+            CHARFORMAT2W cf{};
+            cf.cbSize = sizeof(cf);
+
+            switch (r.kind) {
+            case format_kind::heading:
+                cf.dwMask = CFM_BOLD | CFM_SIZE | CFM_COLOR;
+                cf.dwEffects = CFE_BOLD;
+                cf.yHeight = t.font.twips * 6 / 5; // headings are 20% larger
+                cf.crTextColor = t.heading;
+                break;
+
+            case format_kind::label:
+                cf.dwMask = CFM_BOLD | CFM_COLOR;
+                cf.dwEffects = CFE_BOLD;
+                cf.crTextColor = t.text;
+                break;
+
+            case format_kind::hyperlink:
+                cf.dwMask = CFM_UNDERLINE | CFM_COLOR | CFM_LINK;
+                cf.dwEffects = CFE_UNDERLINE | CFE_LINK;
+                cf.crTextColor = t.link;
+                break;
+
+            case format_kind::json_key:
+                cf.dwMask = CFM_COLOR;
+                cf.crTextColor = t.json_key;
+                break;
+
+            case format_kind::json_string:
+                cf.dwMask = CFM_COLOR;
+                cf.crTextColor = t.json_string;
+                break;
+
+            case format_kind::json_number:
+                cf.dwMask = CFM_COLOR;
+                cf.crTextColor = t.json_number;
+                break;
+
+            case format_kind::json_literal:
+                cf.dwMask = CFM_COLOR;
+                cf.crTextColor = t.json_literal;
+                break;
+            }
+
+            set_rich_selection(edit, r.start, r.end);
+            ::SendMessageW(edit, EM_SETCHARFORMAT, SCF_SELECTION, reinterpret_cast<LPARAM>(&cf));
+        }
+
+        set_rich_selection(edit, 0, 0);
+    }
+
+    // Replaces the whole content of a Rich Edit with `doc`.
+    void set_document(HWND edit, const rich_document& doc, const info_theme& t) {
+        ::SendMessage(edit, WM_SETREDRAW, FALSE, 0);
+
+        set_rich_selection(edit, 0, -1);
+        ::SendMessage(edit, EM_REPLACESEL, FALSE, reinterpret_cast<LPARAM>(L""));
+
+        if (!doc.text.empty()) {
+            SETTEXTEX st{};
+            st.flags = ST_DEFAULT;
+            st.codepage = 1200;
+            ::SendMessage(edit, EM_SETTEXTEX, reinterpret_cast<WPARAM>(&st),
+                reinterpret_cast<LPARAM>(doc.text.c_str()));
+        }
+
+        ::SendMessage(edit, EM_SETBKGNDCOLOR, 0, static_cast<LPARAM>(t.background));
+        format_document(edit, doc, t);
+
+        set_rich_selection(edit, 0, 0);
+        ::SendMessage(edit, EM_SCROLLCARET, 0, 0);
+
+        ::SendMessage(edit, WM_SETREDRAW, TRUE, 0);
+        ::InvalidateRect(edit, nullptr, TRUE);
+    }
+
+    // Opens the web page behind a clicked link (EN_LINK notification).
+    void open_link(LPNMHDR hdr) {
+        auto* link = reinterpret_cast<ENLINK*>(hdr);
+
+        if (link->msg != WM_LBUTTONUP) {
+            return;
+        }
+
+        const LONG len = link->chrg.cpMax - link->chrg.cpMin;
+
+        if (len <= 0 || len > 2048) {
+            return;
+        }
+
+        std::wstring url(static_cast<size_t>(len) + 1, L'\0');
+
+        TEXTRANGEW range{};
+        range.chrg = link->chrg;
+        range.lpstrText = url.data();
+
+        ::SendMessage(hdr->hwndFrom, EM_GETTEXTRANGE, 0, reinterpret_cast<LPARAM>(&range));
+
+        url.resize(static_cast<size_t>(len));
+
+        std::wstring target;
+
+        if (is_web_url(url)) {
+            target = url;
+        }
+        else if (is_mbid(url)) {
+            target = L"https://musicbrainz.org/artist/" + url;
+        }
+
+        if (!target.empty()) {
+            ::ShellExecuteW(nullptr, L"open", target.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+        }
+    }
+
     // ------------------------------------------------------------- dialog ------
 
     class artist_info_dialog;
 
     std::map<std::string, artist_info_dialog*> g_open;
 
+    // A record read from the database and turned into display content. Both steps run on
+    // the background thread (JSON parsing and highlighting are far too slow for the UI thread).
+    struct info_load {
+        std::mutex m;
+        bool ready = false;
+        std::wstring title;
+        artist_content content;
+    };
+
     // Hook that refreshes the Rich Edit when foobar2000 changes UI colors.
     class artist_info_dark_mode_hooks : public fb2k::CDarkModeHooks {
     public:
         std::function<void()> on_colors_changed;
+        std::function<void()> on_fonts_changed;
 
     private:
         void ui_colors_changed() override {
@@ -665,7 +892,9 @@ namespace {
         }
 
         void ui_fonts_changed() override {
-            // Font changes are not customized by this dialog.
+            if (on_fonts_changed) {
+                on_fonts_changed();
+            }
         }
     };
 
@@ -696,11 +925,39 @@ namespace {
             }
         }
 
+        // Reads the record and builds its content off the UI thread; the window's timer
+        // installs the result, so opening (or refreshing) never blocks the UI.
+        void begin_load(const artist_list_item& item) {
+            auto load = std::make_shared<info_load>();
+            m_load = load;
+
+            mbdb_run_async([load, item] {
+                artist_record record;
+                const bool have = mbdb_artist_get(item.mbid, record);
+
+                const std::string& name =
+                    (have && !record.name.empty()) ? record.name : item.name;
+
+                std::wstring title = utf8_to_wide(name + " - MusicBrainz artist");
+                artist_content content = build_content(item, have ? &record : nullptr);
+
+                std::lock_guard<std::mutex> lock(load->m);
+                load->title = std::move(title);
+                load->content = std::move(content);
+                load->ready = true;
+                });
+
+            if (m_hWnd) {
+                SetTimer(kLoadTimerId, 50);
+            }
+        }
+
         BEGIN_MSG_MAP_EX(artist_info_dialog)
             MSG_WM_INITDIALOG(OnInitDialog)
             MSG_WM_SIZE(OnSize)
             MSG_WM_CLOSE(OnClose)
             MSG_WM_DESTROY(OnDestroy)
+            MSG_WM_TIMER(OnTimer)
 
             COMMAND_ID_HANDLER_EX(IDCANCEL, OnCloseCommand)
             COMMAND_ID_HANDLER_EX(IDOK, OnCloseCommand)
@@ -719,29 +976,16 @@ namespace {
 
         void update_theme() {
             const bool dark = fb2k::isDarkMode();
+            const info_theme t = make_theme(dark);
 
-            if (dark) {
-                m_background_color = RGB(30, 30, 30);
-                m_text_color = RGB(220, 220, 220);
-                m_heading_color = RGB(130, 180, 240);
-                m_link_color = RGB(100, 175, 255);
-
-                m_json_key_color = RGB(156, 220, 150);     // Corrected: strings/keys
-                m_json_string_color = RGB(206, 145, 120);  // Corrected: string values
-                m_json_number_color = RGB(181, 206, 168);  // Numbers
-                m_json_literal_color = RGB(197, 134, 192); // Booleans/null
-            }
-            else {
-                m_background_color = RGB(255, 255, 255);
-                m_text_color = RGB(35, 35, 35);
-                m_heading_color = RGB(50, 115, 190);
-                m_link_color = RGB(35, 115, 205);
-
-                m_json_key_color = RGB(0, 0, 255);         // Corrected: keys
-                m_json_string_color = RGB(163, 21, 21);    // Corrected: strings
-                m_json_number_color = RGB(9, 134, 88);     // Numbers
-                m_json_literal_color = RGB(128, 0, 128);   // Booleans/null
-            }
+            m_background_color = t.background;
+            m_text_color = t.text;
+            m_heading_color = t.heading;
+            m_link_color = t.link;
+            m_json_key_color = t.json_key;
+            m_json_string_color = t.json_string;
+            m_json_number_color = t.json_number;
+            m_json_literal_color = t.json_literal;
 
             HWND edit = GetDlgItem(IDC_INFO_TEXT);
 
@@ -783,6 +1027,12 @@ namespace {
                 }
                 };
 
+
+            m_dark.on_fonts_changed = [this]() {
+                if (m_hWnd && ::IsWindow(m_hWnd)) {
+                    update_theme(); // re-renders the text with the UI's new font
+                }
+                };
 
             m_dark.AddDialogWithControls(*this);
 
@@ -831,81 +1081,17 @@ namespace {
         // --------------------------------------------------------- formatting ----
 
         void apply_formatting(HWND edit, const rich_document& doc) {
-            const LONG text_length = static_cast<LONG>(doc.text.length());
-            if (text_length <= 0) return;
+            info_theme t = make_theme(fb2k::isDarkMode()); // carries the UI font
+            t.background = m_background_color;
+            t.text = m_text_color;
+            t.heading = m_heading_color;
+            t.link = m_link_color;
+            t.json_key = m_json_key_color;
+            t.json_string = m_json_string_color;
+            t.json_number = m_json_number_color;
+            t.json_literal = m_json_literal_color;
 
-            // 1. Set base format for the entire document first
-            CHARFORMAT2W base{};
-            base.cbSize = sizeof(base);
-            base.dwMask = CFM_COLOR | CFM_SIZE | CFM_FACE | CFM_BOLD | CFM_ITALIC | CFM_UNDERLINE | CFM_LINK;
-            base.dwEffects = 0;
-            base.yHeight = 200; // 10pt
-            base.crTextColor = m_text_color;
-            wcscpy_s(base.szFaceName, L"Segoe UI");
-
-            set_rich_selection(edit, 0, text_length);
-            ::SendMessageW(edit, EM_SETCHARFORMAT, SCF_SELECTION, reinterpret_cast<LPARAM>(&base));
-
-            // 2. Apply each range with its exact isolated mask and color
-            for (const auto& r : doc.ranges) {
-                if (r.start < 0 || r.end <= r.start || r.end > text_length) {
-                    continue;
-                }
-
-                CHARFORMAT2W cf{};
-                cf.cbSize = sizeof(cf);
-
-                switch (r.kind) {
-                case format_kind::heading:
-                    cf.dwMask = CFM_BOLD | CFM_SIZE | CFM_COLOR;
-                    cf.dwEffects = CFE_BOLD;
-                    cf.yHeight = 240; // 12pt
-                    cf.crTextColor = m_heading_color;
-                    break;
-
-                case format_kind::label:
-                    cf.dwMask = CFM_BOLD | CFM_COLOR;
-                    cf.dwEffects = CFE_BOLD;
-                    cf.crTextColor = m_text_color; // Explicitly set to standard text color
-                    break;
-
-                case format_kind::hyperlink:
-                    cf.dwMask = CFM_UNDERLINE | CFM_COLOR | CFM_LINK;
-                    cf.dwEffects = CFE_UNDERLINE | CFE_LINK;
-                    cf.crTextColor = m_link_color;
-                    break;
-
-                case format_kind::json_key:
-                    cf.dwMask = CFM_COLOR;
-                    cf.dwEffects = 0;
-                    cf.crTextColor = m_json_key_color;
-                    break;
-
-                case format_kind::json_string:
-                    cf.dwMask = CFM_COLOR;
-                    cf.dwEffects = 0;
-                    cf.crTextColor = m_json_string_color;
-                    break;
-
-                case format_kind::json_number:
-                    cf.dwMask = CFM_COLOR;
-                    cf.dwEffects = 0;
-                    cf.crTextColor = m_json_number_color;
-                    break;
-
-                case format_kind::json_literal:
-                    cf.dwMask = CFM_COLOR;
-                    cf.dwEffects = 0;
-                    cf.crTextColor = m_json_literal_color;
-                    break;
-                }
-
-                set_rich_selection(edit, r.start, r.end);
-                ::SendMessageW(edit, EM_SETCHARFORMAT, SCF_SELECTION, reinterpret_cast<LPARAM>(&cf));
-            }
-
-            // Restore caret to the beginning
-            set_rich_selection(edit, 0, 0);
+            format_document(edit, doc, t);
         }
 
         // --------------------------------------------------------- content -------
@@ -1033,54 +1219,7 @@ namespace {
         }
 
         LRESULT OnLink(LPNMHDR hdr) {
-            auto* link = reinterpret_cast<ENLINK*>(hdr);
-
-            if (link->msg != WM_LBUTTONUP) {
-                return 0;
-            }
-
-            const LONG len =
-                link->chrg.cpMax - link->chrg.cpMin;
-
-            if (len <= 0 || len > 2048) {
-                return 0;
-            }
-
-            std::wstring url(static_cast<size_t>(len) + 1, L'\0');
-
-            TEXTRANGEW range{};
-            range.chrg = link->chrg;
-            range.lpstrText = url.data();
-
-            ::SendMessage(
-                hdr->hwndFrom,
-                EM_GETTEXTRANGE,
-                0,
-                reinterpret_cast<LPARAM>(&range)
-            );
-
-            url.resize(static_cast<size_t>(len));
-
-            std::wstring target;
-
-            if (is_web_url(url)) {
-                target = url;
-            }
-            else if (is_mbid(url)) {
-                target = L"https://musicbrainz.org/artist/" + url;
-            }
-
-            if (!target.empty()) {
-                ::ShellExecuteW(
-                    nullptr,
-                    L"open",
-                    target.c_str(),
-                    nullptr,
-                    nullptr,
-                    SW_SHOWNORMAL
-                );
-            }
-
+            open_link(hdr);
             return 0;
         }
 
@@ -1092,8 +1231,39 @@ namespace {
             DestroyWindow();
         }
 
+        void OnTimer(UINT_PTR id) {
+            if (id != kLoadTimerId || !m_load) {
+                SetMsgHandled(FALSE);
+                return;
+            }
+
+            std::wstring title;
+            artist_content content;
+            bool ready = false;
+
+            {
+                std::lock_guard<std::mutex> lock(m_load->m);
+
+                if (m_load->ready) {
+                    ready = true;
+                    title = std::move(m_load->title);
+                    content = std::move(m_load->content);
+                }
+            }
+
+            if (!ready) {
+                return;
+            }
+
+            KillTimer(kLoadTimerId);
+            m_load.reset();
+            set_content(title, content);
+        }
+
         void OnDestroy() {
+            KillTimer(kLoadTimerId);
             m_dark.on_colors_changed = {};
+            m_dark.on_fonts_changed = {};
 
             modeless_dialog_manager::g_remove(m_hWnd);
             g_open.erase(m_mbid);
@@ -1109,6 +1279,8 @@ namespace {
 
         rich_document m_main;
         rich_document m_raw;
+        std::shared_ptr<info_load> m_load;
+        static constexpr UINT_PTR kLoadTimerId = 1;
 
         bool m_show_raw = false;
 
@@ -1134,6 +1306,11 @@ namespace {
 
 } // namespace
 
+// Opaque content handle for the panel API (see artist_info_view.h).
+struct mbdb_info_content {
+    artist_content content;
+};
+
 // ------------------------------------------------------------- public API --
 
 void mbdb_show_artist_info(const artist_list_item& item) {
@@ -1141,25 +1318,12 @@ void mbdb_show_artist_info(const artist_list_item& item) {
         return;
     }
 
-    artist_record record;
-    const bool have = mbdb_artist_get(item.mbid, record);
-
-    const std::string& name =
-        (have && !record.name.empty()) ? record.name : item.name;
-
-    const std::wstring title = utf8_to_wide(
-        name + " - MusicBrainz artist"
-    );
-
-    const artist_content content =
-        build_content(item, have ? &record : nullptr);
-
     const auto existing = g_open.find(item.mbid);
 
     if (existing != g_open.end()) {
         artist_info_dialog* dlg = existing->second;
 
-        dlg->set_content(title, content);
+        dlg->begin_load(item); // refreshes in the background; the window keeps its content meanwhile
 
         if (dlg->IsIconic()) {
             dlg->ShowWindow(SW_RESTORE);
@@ -1171,7 +1335,13 @@ void mbdb_show_artist_info(const artist_list_item& item) {
 
     auto* dlg = new artist_info_dialog(item.mbid);
 
-    dlg->set_content(title, content);
+    // Show the window straight away; the record is read and formatted on the background thread.
+    artist_content loading;
+    loading.main.plain("Loading artist information...\r\n");
+
+    dlg->set_content(
+        utf8_to_wide((item.name.empty() ? item.mbid : item.name) + " - MusicBrainz artist"),
+        loading);
 
     if (!dlg->Create(core_api::get_main_window())) {
         delete dlg;
@@ -1182,5 +1352,71 @@ void mbdb_show_artist_info(const artist_list_item& item) {
 
     modeless_dialog_manager::g_add(dlg->m_hWnd);
 
+    dlg->begin_load(item);
     dlg->ShowWindow(SW_SHOW);
+}
+
+// ------------------------------------------------------------- panel API ---
+// Rich Edit rendering for the activity panel's "Now playing" tab (artist_info_view.h).
+
+HWND mbdb_info_create_richedit(HWND parent) {
+    if (!load_richedit()) return nullptr;
+
+    HWND edit = ::CreateWindowExW(0, L"RICHEDIT50W", L"",
+        WS_CHILD | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | WS_VSCROLL,
+        0, 0, 0, 0, parent, nullptr,
+        reinterpret_cast<HINSTANCE>(::GetWindowLongPtrW(parent, GWLP_HINSTANCE)), nullptr);
+
+    if (edit) {
+        ::SendMessage(edit, EM_SETLIMITTEXT, 0x7FFFFFFE, 0);
+        ::SendMessage(edit, EM_SETEVENTMASK, 0, ::SendMessage(edit, EM_GETEVENTMASK, 0, 0) | ENM_LINK);
+    }
+
+    return edit;
+}
+
+static void render_in_panel(HWND edit, const rich_document& doc, bool dark, COLORREF background, COLORREF text, HFONT font) {
+    info_theme t = make_theme(dark);
+    if (font) t.font = describe_font(font); // the panel's own (host-defined) font
+    if (background != CLR_INVALID) t.background = background; // follow the panel's own colours
+    if (text != CLR_INVALID) t.text = text;
+
+    apply_rich_edit_scrollbar_theme(edit, dark);
+    set_document(edit, doc, t);
+}
+
+std::shared_ptr<const mbdb_info_content> mbdb_info_build(const artist_list_item& item, const artist_record* record) {
+    auto result = std::make_shared<mbdb_info_content>();
+    result->content = build_content(item, record); // pure data work: safe on any thread
+    return result;
+}
+
+bool mbdb_info_has_raw(const mbdb_info_content& content) {
+    return !content.content.raw.text.empty();
+}
+
+void mbdb_info_render(HWND edit, const mbdb_info_content& content, bool show_raw,
+                      bool dark, COLORREF background, COLORREF text, HFONT font) {
+    if (!edit || !::IsWindow(edit)) return;
+
+    rich_document doc = content.content.main;
+
+    if (show_raw && !content.content.raw.text.empty()) {
+        doc.merge(content.content.raw);
+    }
+
+    render_in_panel(edit, doc, dark, background, text, font);
+}
+
+void mbdb_info_render_message(HWND edit, const std::string& message, bool dark,
+                              COLORREF background, COLORREF text, HFONT font) {
+    if (!edit || !::IsWindow(edit)) return;
+
+    rich_document doc;
+    doc.append(message);
+    render_in_panel(edit, doc, dark, background, text, font);
+}
+
+void mbdb_info_open_link(LPNMHDR hdr) {
+    if (hdr) open_link(hdr);
 }

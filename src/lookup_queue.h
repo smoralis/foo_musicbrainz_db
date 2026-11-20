@@ -12,5 +12,10 @@ size_t mbdb_search_selection();
 // Drops every lookup that is still waiting. A lookup already running finishes.
 void mbdb_cancel_queued();
 
+// Refreshes the Now playing view after a successful "Search selected": the playing
+// artist may have just been stored. Re-publishes the playing artist (so the view
+// reloads its record), or, when the playing track had no match, looks it up again.
+void mbdb_reload_now_playing();
+
 // Stops the worker thread (call from on_quit, after musicbrainz_client_abort()).
 void mbdb_lookup_queue_shutdown();

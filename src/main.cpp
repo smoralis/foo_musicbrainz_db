@@ -3,7 +3,7 @@
 
 DECLARE_COMPONENT_VERSION(
     "MusicBrainz Database Provider",
-    "0.1.2",
+    "0.1.3",
     "MusicBrainz metadata cache and JSON repository provider.\n"
     "SDK integration prototype for foobar2000 2.x.");
 

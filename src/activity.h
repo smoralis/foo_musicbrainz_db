@@ -44,6 +44,18 @@ void clear_events();
 size_t event_count();
 std::vector<event_t> events(size_t skip, size_t count); // newest first
 
+// --- now playing (the panel's "Now playing" tab) ---
+enum np_state_t { np_idle, np_searching, np_found, np_not_found, np_stopped }; // np_stopped: playback was stopped
+struct now_playing_t {
+    np_state_t state = np_idle;
+    std::string label; // what is being looked up, or a short message
+    std::string mbid;  // the artist, when state == np_found
+    uint64_t revision = 0;
+};
+void now_playing_set(np_state_t state, const char* label, const char* mbid);
+now_playing_t now_playing();
+uint64_t now_playing_revision();
+
 // --- statistics ---
 stats_t stats();
 bool searching();      // cheap check for the panel's animation
@@ -53,8 +65,10 @@ uint64_t db_revision(); // changes whenever the artists table changes (panel rel
 
 // Batch progress (the panel's "Search selected" progress bar)
 void batch_add(size_t count);       // `count` lookups were queued as part of a batch
-void batch_item_done(bool ok);      // one batch lookup finished
-void batch_drop(size_t count);      // `count` queued batch lookups were cancelled
+// Both return true when this call completed the batch and at least one of its lookups succeeded
+// (the caller then refreshes the Now playing view).
+bool batch_item_done(bool ok);      // one batch lookup finished
+bool batch_drop(size_t count);      // `count` queued batch lookups were cancelled
 bool batch_visible();
 
 void lookup_queued();

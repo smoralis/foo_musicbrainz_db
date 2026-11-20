@@ -17,4 +17,8 @@ std::string title_pattern();
 // started (0 = immediately). A newer change restarts the wait.
 unsigned dynamic_delay_seconds();
 
+// Minimum time between two MusicBrainz requests, in seconds. Never below 1
+// (MusicBrainz allows an average of one request per second).
+unsigned rate_limit_seconds();
+
 }

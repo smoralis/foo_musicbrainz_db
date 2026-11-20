@@ -44,6 +44,21 @@ bool musicbrainz_db_provider::search_artist_title(const char* artist,
         const char* title,std::string& mbid) {
     mbid.clear();
     if(!artist||!*artist) return false;
+    // An artist with this exact name is already in the database: use it and skip MusicBrainz.
+    {
+        std::string known;
+        const int matches=m_database.find_artists_by_name(artist,known);
+        if(matches==1) {
+            mbdb_activity::cache_hit();
+            mbdb_activity::set_step("artist found in the database");
+            MBDB_LOG("search: '%s' is already in the database (%s), no MusicBrainz search needed", artist, known.c_str());
+            mbid=known;
+            return true;
+        }
+        if(matches>1)
+            MBDB_LOG("search: several artists named '%s' are in the database, searching MusicBrainz to tell them apart", artist);
+    }
+
     const bool haveTitle=title&&*title;
     bool found=false;
     if(haveTitle) {
@@ -63,7 +78,7 @@ bool musicbrainz_db_provider::search_artist_title(const char* artist,
     }
     artist_record a;
     if(!load_artist(mbid,a)) { mbid.clear(); return false; }
-    MBDB_LOG("search: done, artist mbid %s", mbid.c_str());
+    MBDB_LOG("search: done, artist mbid %s => '%s'", mbid.c_str(), artist);
     return true;
 }
 bool musicbrainz_db_provider::ensure_artist(const char* mbid) {

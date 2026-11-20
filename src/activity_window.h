@@ -1,6 +1,7 @@
 #pragma once
 #include "stdafx.h"
 #include <memory>
+#include "artist_info_view.h"
 #include <mutex>
 #include <string>
 #include <vector>
@@ -12,6 +13,15 @@ struct activity_reload_state {
     bool ready = false;
     uint64_t revision = 0;
     std::vector<artist_list_item> rows;
+};
+
+// Result of a background lookup of the playing artist's stored record.
+struct activity_np_fetch {
+    std::mutex m;
+    bool ready = false;
+    bool ok = false;
+    artist_record record;
+    std::shared_ptr<const mbdb_info_content> content; // built on the background thread
 };
 
 // What the panel needs from its host (DUI element or CUI panel).
@@ -41,6 +51,7 @@ public:
     void set_host(activity_host* host) { m_host = host; }
     void refresh_theme(); // call when the host reports colour/font changes
     void on_edit_mode_changed(); // call when the host's layout edit mode is toggled
+    void show_now_playing_only(); // standalone "Now playing" panel: only that view, no title/tabs
 
     BEGIN_MSG_MAP(activity_window)
         MESSAGE_HANDLER(WM_CREATE, OnCreate)
@@ -60,7 +71,9 @@ public:
         MESSAGE_HANDLER(WM_MOUSELEAVE, OnMouseLeave)
         MESSAGE_HANDLER(WM_LBUTTONDOWN, OnLButtonDown)
         MESSAGE_HANDLER(WM_LBUTTONUP, OnLButtonUp)
+        MESSAGE_HANDLER(WM_CAPTURECHANGED, OnCaptureChanged)
         MESSAGE_HANDLER(WM_LBUTTONDBLCLK, OnLButtonDblClk)
+        MESSAGE_HANDLER(WM_NOTIFY, OnNotify)
         MESSAGE_HANDLER(WM_SYSCOLORCHANGE, OnThemeMessage)
         MESSAGE_HANDLER(WM_SETTINGCHANGE, OnThemeMessage)
         MESSAGE_HANDLER(WM_CONTEXTMENU, OnContextMenu)
@@ -84,7 +97,9 @@ private:
     LRESULT OnMouseLeave(UINT, WPARAM, LPARAM, BOOL&);
     LRESULT OnLButtonDown(UINT, WPARAM, LPARAM, BOOL&);
     LRESULT OnLButtonUp(UINT, WPARAM, LPARAM, BOOL&);
+    LRESULT OnCaptureChanged(UINT, WPARAM, LPARAM, BOOL&);
     LRESULT OnLButtonDblClk(UINT, WPARAM, LPARAM, BOOL&);
+    LRESULT OnNotify(UINT, WPARAM, LPARAM, BOOL&);
     LRESULT OnThemeMessage(UINT, WPARAM, LPARAM, BOOL&);
     LRESULT OnContextMenu(UINT, WPARAM, LPARAM, BOOL&);
     LRESULT OnNcHitTest(UINT, WPARAM, LPARAM, BOOL&);
@@ -102,6 +117,21 @@ private:
     void draw_button(HDC dc, int index, const std::wstring& label);
     bool tab_mouse_down(POINT pt);
     bool artists_mouse_down(POINT pt);
+    // Scrollbar beside the events list / artists table (activity_scrollbar.cpp)
+    void draw_scrollbar(HDC dc, int left, int top, int bottom, int dpi, size_t total, size_t visible, size_t offset);
+    bool scrollbar_mouse_down(POINT pt);
+    void scrollbar_mouse_move(POINT pt);
+    void scrollbar_mouse_up();
+    size_t scroll_max() const;
+    void set_scroll(long long offset);
+
+    // Now-playing tab (activity_nowplaying.cpp)
+    void paint_nowplaying(HDC dc, const RECT& rc, int x, int right, int& y, int line_h, int gap, int pad, int dpi);
+    bool poll_nowplaying();
+    void render_nowplaying();
+    void create_info();
+    void position_info(const RECT& r);
+
     bool artists_dbl_click(POINT pt);     // opens the artist info window
     void artists_wheel(int steps);
     void artists_context_menu(POINT screen_pt);
@@ -133,10 +163,26 @@ private:
     // Toolbar buttons drawn on the title row: 0 = Search selected, 1 = Cancel queued.
     // Toolbar buttons: 0 = Search selected, 1 = Cancel queued (title row);
     // 2 = Delete selected, 3 = Export JSON, 4 = Refresh (artists tab only).
-    RECT m_btn[5] = {};
+    RECT m_btn[6] = {};
     int m_hot = -1, m_down = -1;
+    RECT m_sb_track = {}, m_sb_thumb = {};   // empty when the list fits
+    size_t m_sb_total = 0, m_sb_visible = 0;
+    int m_sb_grab = 0;
+    bool m_sb_dragging = false, m_sb_hot = false;
+
+    // Now-playing tab
+    CWindow m_info;                         // Rich Edit showing the playing artist
+    RECT m_info_applied = {};
+    uint64_t m_np_revision = 0, m_np_db_revision = 0;
+    int m_np_state = 0;                     // mbdb_activity::np_state_t
+    std::string m_np_label, m_np_mbid;
+    bool m_np_has_record = false, m_np_raw = false, m_np_dirty = true;
+    artist_record m_np_record;
+    std::shared_ptr<const mbdb_info_content> m_np_content; // ready-to-render sections for the record
+    std::shared_ptr<activity_np_fetch> m_np_fetch;
     bool m_tracking = false;
     // Artists tab
+    bool m_np_only = false;                 // standalone Now playing panel
     int m_view = 0;                         // 0 = activity, 1 = artists
     std::vector<artist_list_item> m_rows;
     std::vector<char> m_sel;                // indexed by row id
@@ -155,7 +201,7 @@ private:
     int m_sort_col = 0;                     // 0 name, 1 country, 2 mbid
     bool m_sort_asc = true;
     long long m_focus = -1, m_anchor = -1;  // display positions
-    RECT m_tab[2] = {}, m_header_rc = {}, m_list_rc = {};
+    RECT m_tab[3] = {}, m_header_rc = {}, m_list_rc = {};
     int m_col_x[4] = {};
     int m_row_h = 0;
     bool m_batch_was_visible = false; // so the timer repaints once more when the bar hides

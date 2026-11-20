@@ -14,8 +14,13 @@ const GUID guid_cfg_artist_field = { 0x9c34da68, 0x9e46, 0x44b8, { 0x88, 0xd6, 0
 const GUID guid_cfg_title_field  = { 0x6a400bd4, 0x3dee, 0x4c4b, { 0xb3, 0xff, 0xa4, 0x88, 0xa4, 0xc9, 0x1d, 0xec } };
 
 const GUID guid_cfg_dynamic_delay = { 0x2b0529ae, 0xc9a6, 0x447e, { 0x99, 0xe7, 0x97, 0xa2, 0x6e, 0x3d, 0xd8, 0x2b } };
+const GUID guid_cfg_rate_limit    = { 0x5d1c7a3e, 0x2f84, 0x4b19, { 0xa6, 0x0e, 0x91, 0x3c, 0xd4, 0x7b, 0x28, 0xf5 } };
 
 constexpr unsigned k_max_dynamic_delay = 300; // seconds
+
+constexpr unsigned k_min_rate_limit = 1;      // seconds; never allow less
+constexpr unsigned k_default_rate_limit = 2;  // seconds
+constexpr unsigned k_max_rate_limit = 60;     // seconds
 
 constexpr bool k_default_debug_log = false; // debug logging is off unless the user enables it
 
@@ -23,6 +28,7 @@ cfg_bool   g_cfg_debug_log(guid_cfg_debug_log, k_default_debug_log);
 cfg_string g_cfg_artist(guid_cfg_artist_field, "");
 cfg_string g_cfg_title(guid_cfg_title_field, "");
 cfg_int    g_cfg_dynamic_delay(guid_cfg_dynamic_delay, 0);
+cfg_int    g_cfg_rate_limit(guid_cfg_rate_limit, k_default_rate_limit);
 
 // cfg_string is a plain pfc::string8; guard it because lookups read it from
 // worker threads while the page may be writing it on the UI thread.
@@ -55,7 +61,9 @@ public:
             g_cfg_artist.set_string(read_edit(IDC_ARTIST_FIELD).get_ptr());
             g_cfg_title.set_string(read_edit(IDC_TITLE_FIELD).get_ptr());
             g_cfg_dynamic_delay = static_cast<t_int32>(read_delay());
+            g_cfg_rate_limit = static_cast<t_int32>(read_rate_limit());
         }
+        SetDlgItemInt(IDC_RATE_LIMIT, read_rate_limit(), FALSE); // shows the clamped value
         m_callback->on_state_changed();
     }
 
@@ -64,6 +72,7 @@ public:
         uSetDlgItemText(*this, IDC_ARTIST_FIELD, "");
         uSetDlgItemText(*this, IDC_TITLE_FIELD, "");
         SetDlgItemInt(IDC_DYNAMIC_DELAY, 0, FALSE);
+        SetDlgItemInt(IDC_RATE_LIMIT, k_default_rate_limit, FALSE);
         update_status();
         m_callback->on_state_changed();
     }
@@ -74,6 +83,7 @@ public:
         COMMAND_HANDLER_EX(IDC_ARTIST_FIELD, EN_CHANGE, OnEdited)
         COMMAND_HANDLER_EX(IDC_TITLE_FIELD, EN_CHANGE, OnEdited)
         COMMAND_HANDLER_EX(IDC_DYNAMIC_DELAY, EN_CHANGE, OnEdited)
+        COMMAND_HANDLER_EX(IDC_RATE_LIMIT, EN_CHANGE, OnEdited)
     END_MSG_MAP()
 
 private:
@@ -88,10 +98,12 @@ private:
             uSetDlgItemText(*this, IDC_ARTIST_FIELD, g_cfg_artist.get_ptr());
             uSetDlgItemText(*this, IDC_TITLE_FIELD, g_cfg_title.get_ptr());
             SetDlgItemInt(IDC_DYNAMIC_DELAY, static_cast<UINT>(g_cfg_dynamic_delay.get_value()), FALSE);
+            SetDlgItemInt(IDC_RATE_LIMIT, mbdb_prefs::rate_limit_seconds(), FALSE);
         }
         ::SendMessage(GetDlgItem(IDC_ARTIST_FIELD), EM_SETCUEBANNER, FALSE, (LPARAM)L"%artist% (default)");
         ::SendMessage(GetDlgItem(IDC_TITLE_FIELD), EM_SETCUEBANNER, FALSE, (LPARAM)L"%title% (default)");
         ::SendMessage(GetDlgItem(IDC_DYNAMIC_DELAY), EM_SETLIMITTEXT, 3, 0);
+        ::SendMessage(GetDlgItem(IDC_RATE_LIMIT), EM_SETLIMITTEXT, 2, 0);
         update_status();
         return FALSE;
     }
@@ -115,12 +127,20 @@ private:
         return v > k_max_dynamic_delay ? k_max_dynamic_delay : v;
     }
 
+    // Seconds typed into the rate limit box, clamped to k_min_rate_limit..k_max_rate_limit
+    // (an empty box or 0 counts as the minimum).
+    unsigned read_rate_limit() {
+        const UINT v = GetDlgItemInt(IDC_RATE_LIMIT, nullptr, FALSE);
+        return v < k_min_rate_limit ? k_min_rate_limit : (v > k_max_rate_limit ? k_max_rate_limit : v);
+    }
+
     bool has_changed() {
         std::lock_guard<std::mutex> lock(g_cfg_mutex);
         return is_debug_checked() != g_cfg_debug_log.get_value()
             || strcmp(read_edit(IDC_ARTIST_FIELD).get_ptr(), g_cfg_artist.get_ptr()) != 0
             || strcmp(read_edit(IDC_TITLE_FIELD).get_ptr(), g_cfg_title.get_ptr()) != 0
-            || read_delay() != static_cast<unsigned>(g_cfg_dynamic_delay.get_value());
+            || read_delay() != static_cast<unsigned>(g_cfg_dynamic_delay.get_value())
+            || read_rate_limit() != mbdb_prefs::rate_limit_seconds();
     }
 
     void update_status() {
@@ -161,6 +181,12 @@ bool debug_logging() { return g_cfg_debug_log.get_value(); }
 unsigned dynamic_delay_seconds() {
     const t_int32 v = g_cfg_dynamic_delay.get_value();
     return v < 0 ? 0u : (static_cast<unsigned>(v) > k_max_dynamic_delay ? k_max_dynamic_delay : static_cast<unsigned>(v));
+}
+
+unsigned rate_limit_seconds() {
+    const t_int32 v = g_cfg_rate_limit.get_value();
+    if (v < static_cast<t_int32>(k_min_rate_limit)) return k_min_rate_limit; // also guards a hand-edited config
+    return static_cast<unsigned>(v) > k_max_rate_limit ? k_max_rate_limit : static_cast<unsigned>(v);
 }
 
 std::string artist_pattern() {

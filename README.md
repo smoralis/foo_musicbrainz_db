@@ -9,7 +9,8 @@ A foobar2000 component that quietly builds and maintains a local MusicBrainz art
 
 - **Playback-triggered lookups.** A lookup is queued when a new track starts. The component also handles dynamic track metadata, which is commonly used by Shoutcast/Icecast streams.
 - **MusicBrainz ID tags take priority.** A valid UUID in `MUSICBRAINZ_ARTISTID` or `MUSICBRAINZ ARTIST ID` is used directly; no artist/title search is needed.
-- **Search fallback.** Without an ID, the component searches by recording title and artist, then falls back to an artist-name search. Artist-name results are accepted when the name matches or MusicBrainz reports a very high score.
+- **Known artists are matched by name next.** Without an ID tag, an artist already stored in the database under exactly that name (case-insensitive) is used and MusicBrainz is not queried. If several stored artists share the name, the MusicBrainz searches below decide.
+- **Search fallback.** Without an ID, the component searches by recording title and artist, then falls back to an artist-name search. Results of both searches are accepted only when the artist's name, or one of its aliases, matches the tagged artist name (case-insensitive); a credited-as name also counts for the title search.
 - **Combined stream titles.** If no artist tag is available, a title in `Artist - Title` form is split into artist and title.
 - **Custom tag expressions.** Artist and title can be sourced from user-defined foobar2000 title-formatting patterns instead of the plain `%artist%` and `%title%` metadata fields.
 - **Stream metadata settling delay.** Dynamic-info lookups can be delayed by 0–300 seconds. A newer metadata update restarts the delay, so short-lived jingles, adverts or partial metadata updates need not trigger a lookup. The pending delay is cancelled when playback stops or a new track starts.
@@ -31,10 +32,18 @@ The component provides an **Activity** window in both supported foobar2000 UI sy
 - **Default UI:** a utility element named **MusicBrainz DB activity**.
 - **Columns UI:** a panel named **MusicBrainz DB activity**, in the **Panels** category.
 
-The window follows the host's light/dark colours and font where available. It has two tabs:
+The **Now playing** view is also available on its own, without the title, status line or other tabs:
+
+- **Default UI:** a utility element named **MusicBrainz DB now playing**.
+- **Columns UI:** a panel named **MusicBrainz DB now playing**, in the **Panels** category.
+
+Like the tab, the standalone panels follow the playing track and stream metadata and use the host's colours and font.
+
+The window follows the host's light/dark colours and font where available. It has three tabs:
 
 - **Activity:** shows current lookup/task status, database artist count and size, lookup success/failure totals, queued lookups, cache hits/misses and hit rate, HTTP request/failure/throttling counts, last HTTP status and average request duration. It also shows the event feed. Events can be copied or cleared from its context menu.
 - **Artists:** browses the artists currently cached in SQLite. The list shows artist name, country and type; clicking a column header sorts by that column. A search box filters by artist name, country or MBID.
+- **Now playing:** shows the stored MusicBrainz record of the playing track's artist, with the same sections and links as the artist info window. The first row reads **Now Playing : artist**; the second row holds the **Show raw JSON** button. It follows track changes and stream metadata updates, and shows what it is doing while the lookup runs (or that nothing is playing or nothing was found). When playback stops the view is blank and the first row reads **Now Playing : Stopped**. The view is also cleared when playback stops and when stream metadata changes (while a configured delay is running it shows that it is waiting); a stream that returns to the same song after a jingle is looked up again. When a **Search selected** run finishes with at least one success, the view reloads, so a playing artist that was just stored shows up without waiting for the next track.
 
 The Artists tab supports standard multi-selection (Ctrl-click and Shift-click), keyboard navigation, and these actions:
 
@@ -94,12 +103,15 @@ Open **Preferences > Tools > MusicBrainz DB**.
 | Artist field | Optional foobar2000 title-formatting pattern used instead of the plain artist metadata field. Empty means use the tag. |
 | Title field | Optional title-formatting pattern used instead of the plain title metadata field. Empty means use the tag. |
 | Dynamic info delay (seconds) | Waits 0–300 seconds after stream metadata changes before queuing a lookup. Every newer update restarts the wait; `0` looks up immediately. |
+| Rate limit (seconds) | Minimum time between two MusicBrainz requests. Default 2; values below 1 are not accepted (MusicBrainz allows an average of one request per second). |
+
+For streams that send a combined "Artist - Title" title, the title is split first and the custom patterns are evaluated against the split artist and title. For in-stream metadata updates, the file's own artist, title and MusicBrainz artist ID tags are ignored; its other tags (for example album artist) stay available to the patterns.
 
 Invalid or empty custom patterns fall back to the corresponding plain metadata tag. The preferences page reports invalid patterns. Status messages (initialization, matches and errors) are printed to the console regardless of the debug-logging setting.
 
 ## MusicBrainz requests and rate limiting
 
-Requests are made over HTTPS to `musicbrainz.org`. The client spaces requests by at least 1.1 seconds and handles HTTP 429/503 responses with retries and the server's `Retry-After` back-off when provided. HTTP requests use finite connection/send/receive timeouts. The Activity view reports request status, duration, failures and throttling.
+Requests are made over HTTPS to `musicbrainz.org`. The client spaces requests by at least the configured rate limit (2 seconds by default, never less than 1 second; see Preferences) and handles HTTP 429/503 responses with retries and the server's `Retry-After` back-off when provided. HTTP requests use finite connection/send/receive timeouts. The Activity view reports request status, duration, failures and throttling.
 
 Before distributing a build, replace the placeholder contact details in the `User-Agent` string in `src/musicbrainz_client.cpp` with a valid project or maintainer contact. MusicBrainz asks API clients to identify themselves.
 
@@ -171,3 +183,7 @@ MIT License
 ![Alt text](/screenshot2.png?raw=true "screenshot2")
 
 ![Alt text](/screenshot3.png?raw=true "screenshot3")
+
+![Alt text](/screenshot4.png?raw=true "screenshot4")
+
+![Alt text](/screenshot5.png?raw=true "screenshot5")

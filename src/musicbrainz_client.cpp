@@ -1,6 +1,7 @@
 #include "musicbrainz_client.h"
 #include "debug_log.h"
 #include "activity.h"
+#include "preferences.h"
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
@@ -41,7 +42,10 @@ constexpr size_t kMaxResponse=10u*1024u*1024u;
 // MusicBrainz allows an average of 1 request/second per client and answers
 // excess traffic with 503 (+ Retry-After). Stay safely under that.
 using mb_clock = std::chrono::steady_clock;
-constexpr std::chrono::milliseconds kMinInterval(2000);
+// Spacing between requests: Preferences > Tools > MusicBrainz DB (never below 1 s).
+std::chrono::milliseconds min_interval() {
+    return std::chrono::milliseconds(static_cast<long long>(mbdb_prefs::rate_limit_seconds()) * 1000);
+}
 constexpr int kMaxRetries = 2;          // retries after a 503/429
 constexpr int kDefaultBackoffSec = 5;   // used when no Retry-After header is sent
 constexpr int kMaxBackoffSec = 60;
@@ -72,7 +76,7 @@ bool rate_limit() {
     }
     // Reserve the next slot immediately so the interval is measured from request start.
     std::lock_guard<std::mutex> st(g_state_mutex);
-    g_next_allowed = mb_clock::now() + kMinInterval;
+    g_next_allowed = mb_clock::now() + min_interval();
     return true;
 }
 
@@ -82,7 +86,7 @@ void note_response(int cooldown_seconds) {
     std::lock_guard<std::mutex> st(g_state_mutex);
     const auto t = mb_clock::now() + (cooldown_seconds > 0
         ? std::chrono::duration_cast<mb_clock::duration>(std::chrono::seconds(cooldown_seconds))
-        : std::chrono::duration_cast<mb_clock::duration>(kMinInterval));
+        : std::chrono::duration_cast<mb_clock::duration>(min_interval()));
     if(t > g_next_allowed) g_next_allowed = t;
 }
 std::wstring widen(const std::string& s) {
@@ -113,7 +117,7 @@ static bool http_request_impl(const std::wstring& path,std::string& response,
     status=0; retry_after=0;
     MBDB_LOG("http GET https://musicbrainz.org%ls", path.c_str());
     HINTERNET session=WinHttpOpen(
-        L"foo_musicbrainz_db/0.1 (contact: REPLACE_WITH_CONTACT)",
+        L"foo_musicbrainz_db/0.1.3 (contact: https://github.com/smoralis/foo_musicbrainz_db)",
         WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
         WINHTTP_NO_PROXY_NAME,WINHTTP_NO_PROXY_BYPASS,0);
     if(!session) { MBDB_LOG("http: WinHttpOpen failed (err %lu)", GetLastError()); return false; }
@@ -181,6 +185,24 @@ bool musicbrainz_client::http_get(const std::wstring& path,std::string& response
     }
 }
 void musicbrainz_client_abort() { g_abort.store(true); }
+namespace {
+// True when `wanted` (already lower-cased) equals the artist's name or one of its aliases,
+// compared case-insensitively. `a` is an MusicBrainz artist object (search result or credit).
+bool artist_name_matches(const json& a, const std::string& wanted) {
+    auto lower=[](std::string s) {
+        for(auto& c:s) c=static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        return s;
+    };
+    if(!a.is_object()) return false;
+    if(lower(jstr(a,"name"))==wanted) return true;
+    auto it=a.find("aliases");
+    if(it!=a.end()&&it->is_array()) {
+        for(const auto& al:*it)
+            if(al.is_object()&&lower(jstr(al,"name"))==wanted) return true;
+    }
+    return false;
+}
+}
 bool musicbrainz_client::search_artist_title(const std::string& artist,
         const std::string& title,std::string& artist_mbid) {
     artist_mbid.clear();
@@ -192,32 +214,29 @@ bool musicbrainz_client::search_artist_title(const std::string& artist,
     const std::string wanted=lower(artist);
     std::string q="recording:"+lucene_phrase(title)+" AND artist:"+lucene_phrase(artist);
     std::string response;
-    if(!http_get(widen("/ws/2/recording/?query="+encode(q)+"&fmt=json&limit=1"),
+    if(!http_get(widen("/ws/2/recording/?query="+encode(q)+"&fmt=json&limit=5"),
                  response)) return false;
     try {
         auto data=json::parse(response);
         if(!data.contains("recordings")||!data["recordings"].is_array()) return false;
+        // Strict: a recording counts only when one of its credited artists has the tagged
+        // name (or an alias of it, or was credited under that name). Otherwise it is ignored.
         for(const auto& item:data["recordings"]) {
             if(!item.contains("artist-credit")||!item["artist-credit"].is_array()) continue;
-            std::string first, exact;
             for(const auto& credit:item["artist-credit"]) {
                 if(!credit.contains("artist")) continue;
                 const auto& a=credit["artist"];
                 const std::string id=jstr(a,"id");
                 if(id.empty()) continue;
-                if(first.empty()) first=id;
-                if(exact.empty()&&lower(jstr(a,"name"))==wanted) exact=id;
+                if(!artist_name_matches(a,wanted)&&lower(jstr(credit,"name"))!=wanted) continue;
+                artist_mbid=id;
+                MBDB_LOG("client: title search matched artist %s (name match) via recording '%s'",
+                    artist_mbid.c_str(), jstr(item,"title").c_str());
+                return true;
             }
-            // Prefer the credited artist whose name matches the tag (collaborations).
-            const std::string& pick=exact.empty()?first:exact;
-            if(pick.empty()) continue;
-            artist_mbid=pick;
-            MBDB_LOG("client: title search matched artist %s (%s) via recording '%s'",
-                artist_mbid.c_str(), exact.empty()?"first credit":"name match", jstr(item,"title").c_str());
-            return true;
         }
     } catch(const std::exception& e) { MBDB_LOG("client: recording search JSON error: %s", e.what()); return false; }
-    MBDB_LOG("client: no recording with artist credits in results");
+    MBDB_LOG("client: no recording credits an artist named '%s'", artist.c_str());
     return false;
 }
 bool musicbrainz_client::search_artist_name(const std::string& artist,std::string& artist_mbid) {
@@ -227,28 +246,31 @@ bool musicbrainz_client::search_artist_name(const std::string& artist,std::strin
         for(auto& c:s) c=static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
         return s;
     };
+    // Several results are requested so an exact name match is found even when it is not ranked first.
     std::string response;
     if(!http_get(widen("/ws/2/artist/?query="+encode("artist:"+lucene_phrase(artist))+
-        "&fmt=json&limit=1"),response)) return false;
+        "&fmt=json&limit=10"),response)) return false;
     try {
         auto data=json::parse(response);
         if(!data.contains("artists")||!data["artists"].is_array()||data["artists"].empty()) {
             MBDB_LOG("client: artist name search returned nothing for '%s'", artist.c_str());
             return false;
         }
-        const auto& top=data["artists"][0];
-        const std::string id=jstr(top,"id");
-        const std::string name=jstr(top,"name");
-        const int score=jint(top,"score");
-        const bool sameName=lower(name)==lower(artist);
-        // With only one result, guard against loosely related hits.
-        if(id.empty()||(!sameName&&score<95)) {
-            MBDB_LOG("client: artist name search rejected '%s' (%s, score %d)", name.c_str(), id.c_str(), score);
-            return false;
+        // Accept a result only when its name or an alias matches the searched name
+        // (case-insensitive); a high search score alone is not enough.
+        const std::string wanted=lower(artist);
+        for(const auto& item:data["artists"]) {
+            const std::string id=jstr(item,"id");
+            const std::string name=jstr(item,"name");
+            if(id.empty()||!artist_name_matches(item,wanted)) continue;
+            artist_mbid=id;
+            MBDB_LOG("client: artist name search matched '%s' => %s (score %d%s)", name.c_str(), id.c_str(), jint(item,"score"),
+                lower(name)==wanted?"":", via alias");
+            return true;
         }
-        artist_mbid=id;
-        MBDB_LOG("client: artist name search matched '%s' => %s (score %d)", name.c_str(), id.c_str(), score);
-        return true;
+        MBDB_LOG("client: artist name search found no result named '%s' (top hit: '%s')", artist.c_str(),
+            jstr(data["artists"][0],"name").c_str());
+        return false;
     } catch(const std::exception& e) { MBDB_LOG("client: artist search JSON error: %s", e.what()); return false; }
 }
 bool musicbrainz_client::get_artist(const std::string& mbid,artist_record& r) {

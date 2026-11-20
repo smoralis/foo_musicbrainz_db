@@ -16,6 +16,7 @@
 #include "activity_window.h"
 
 namespace {
+const GUID guid_cui_nowplaying = { 0xbad49171, 0x1b85, 0x4f5b, { 0x8e, 0x0e, 0x4c, 0x1d, 0x66, 0xb0, 0xa4, 0xf1 } };
 const GUID guid_cui_activity = { 0xc8543529, 0x2e8d, 0x4a4e, { 0x92, 0xfb, 0x0f, 0x44, 0x0a, 0x79, 0x7c, 0xd7 } };
 
 // Colours come from Columns UI's global colour scheme (including its dark mode).
@@ -31,10 +32,14 @@ private:
     cui::colours::helper m_helper{ pfc::guid_null };
 };
 
-class cui_activity_panel : public uie::window {
+// NowPlaying == true is the standalone "Now playing" panel; false is the full activity panel.
+template <bool NowPlaying>
+class cui_panel_t : public uie::window {
 public:
-    const GUID& get_extension_guid() const override { return guid_cui_activity; }
-    void get_name(pfc::string_base& out) const override { out = "MusicBrainz DB activity"; }
+    const GUID& get_extension_guid() const override { return NowPlaying ? guid_cui_nowplaying : guid_cui_activity; }
+    void get_name(pfc::string_base& out) const override {
+        out = NowPlaying ? "MusicBrainz DB now playing" : "MusicBrainz DB activity";
+    }
     void get_category(pfc::string_base& out) const override { out = "Panels"; }
     unsigned get_type() const override { return uie::type_panel; }
     bool is_available(const uie::window_host_ptr&) const override { return true; }
@@ -54,6 +59,7 @@ public:
         } else {
             m_window_host = host;
             m_window.set_host(&m_colours);
+            if (NowPlaying) m_window.show_now_playing_only();
             // x/y/cx/cy are not all the same signedness, so convert explicitly.
             const LONG left = static_cast<LONG>(position.x), top = static_cast<LONG>(position.y);
             RECT rc = { left, top, left + static_cast<LONG>(position.cx), top + static_cast<LONG>(position.cy) };
@@ -74,6 +80,7 @@ private:
     uie::window_host_ptr m_window_host;
 };
 
-uie::window_factory<cui_activity_panel> g_cui_activity_factory;
+uie::window_factory<cui_panel_t<false>> g_cui_activity_factory;
+uie::window_factory<cui_panel_t<true>> g_cui_nowplaying_factory;
 } // namespace
 #endif // MBDB_HAVE_CUI

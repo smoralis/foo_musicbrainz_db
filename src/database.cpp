@@ -195,3 +195,25 @@ bool musicbrainz_database::get_artist_jsons(const std::vector<std::string>& mbid
     sqlite3_finalize(s);
     return true;
 }
+
+int musicbrainz_database::find_artists_by_name(const std::string& name, std::string& mbid) {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    mbid.clear();
+    if (!m_db || name.empty()) return 0;
+    sqlite3_stmt* s = nullptr;
+    // Only artists whose full record is stored count: they are what a lookup would return anyway.
+    if (sqlite3_prepare_v2(m_db,
+        "SELECT mbid FROM artists WHERE name = ? COLLATE NOCASE AND json IS NOT NULL AND json <> '' LIMIT 2",
+        -1, &s, nullptr) != SQLITE_OK) return 0;
+    sqlite3_bind_text(s, 1, name.c_str(), -1, SQLITE_TRANSIENT);
+    int count = 0;
+    while (sqlite3_step(s) == SQLITE_ROW) {
+        if (count == 0) {
+            const unsigned char* p = sqlite3_column_text(s, 0);
+            if (p) mbid = reinterpret_cast<const char*>(p);
+        }
+        ++count;
+    }
+    sqlite3_finalize(s);
+    return count;
+}

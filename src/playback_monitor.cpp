@@ -5,6 +5,7 @@
 #include "preferences.h"
 #include "lookup_queue.h"
 #include "lookup_queue_tracks.h"
+#include <atomic>
 #include <cctype>
 #include <chrono>
 #include <condition_variable>
@@ -41,6 +42,54 @@ struct track_query {
     std::string artist, title;
     std::string artist_mbid; // set when the file already carries a MusicBrainz artist id
     bool batch = false;      // queued by "Search selected" (drives the progress bar)
+    bool playing = false;    // belongs to the playing track (drives the "Now playing" tab)
+    unsigned play_seq = 0;   // set when queued; a newer track or stop makes older results stale
+};
+
+// The query of the playing track (guarded by g_last_mutex), kept so that the Now
+// playing view can be refreshed after "Search selected". Valid only while that track plays.
+track_query g_playing_query;
+bool g_playing_valid = false;
+
+// True while the Now playing view was cleared because stream metadata changed and the
+// new metadata has not been looked up yet. Such a lookup must not be dropped as a
+// "repeated update" (e.g. the stream returns to the same song after a jingle).
+std::atomic<bool> g_np_cleared{false};
+
+// A new track or a stop: the next stream update is never a repeat of the previous track's.
+void forget_last_key() {
+    std::lock_guard<std::mutex> lock(g_last_mutex);
+    g_last_key.clear();
+}
+
+void set_playing_valid(bool valid) {
+    std::lock_guard<std::mutex> lock(g_last_mutex);
+    g_playing_valid = valid;
+}
+
+// Bumped whenever the playing track changes, stops, or a newer playing-track lookup is queued.
+std::atomic<unsigned> g_play_seq{0};
+
+std::string describe_query(const track_query& q) {
+    if (!q.artist_mbid.empty())
+        return q.artist.empty() ? "artist MBID " + q.artist_mbid : q.artist + " (artist MBID from tags)";
+    return q.title.empty() ? q.artist : q.artist + " - " + q.title;
+}
+
+// Publishes the outcome for the "Now playing" tab however run_lookup() exits, but
+// only if this lookup still belongs to the current track.
+struct playing_guard {
+    explicit playing_guard(const track_query& q) : seq(q.play_seq), what(describe_query(q)) {}
+    ~playing_guard() {
+        if (seq == 0 || seq != g_play_seq.load()) return;
+        if (ok) mbdb_activity::now_playing_set(mbdb_activity::np_found, what.c_str(), mbid.c_str());
+        else mbdb_activity::now_playing_set(mbdb_activity::np_not_found,
+            ("No MusicBrainz artist found for " + what + ".").c_str(), "");
+    }
+    unsigned seq;
+    std::string what;
+    std::string mbid;
+    bool ok = false;
 };
 
 // Evaluates a user-defined titleformatting pattern (Preferences > Tools >
@@ -78,48 +127,81 @@ void apply_custom_fields(const metadb_handle_ptr& handle, const file_info& info,
 
 // Reads artist/title from tags. An artist alone is enough (artist-name search).
 // Radio streams often deliver only a combined "Artist - Title" StreamTitle, so
-// when there is no artist tag, split the title field.
-bool extract_artist_title(const metadb_handle_ptr& handle, const file_info& info,
+// when there is no artist tag, split the title field. The split happens first, and
+// `info` is updated with the split values, so the custom field patterns (Preferences)
+// are evaluated against the same artist and title that the lookup uses, never against
+// the raw combined title.
+bool extract_artist_title(const metadb_handle_ptr& handle, file_info_impl& info,
                           std::string& artist, std::string& title) {
     const char* a = info.meta_get("artist", 0);
     const char* t = info.meta_get("title", 0);
     artist = trim(a ? a : "");
     title = trim(t ? t : "");
+    if (artist.empty()) {
+        const auto pos = title.find(" - ");
+        if (pos != std::string::npos && pos != 0) {
+            const std::string split_artist = trim(title.substr(0, pos));
+            const std::string split_title = trim(title.substr(pos + 3));
+            if (!split_artist.empty()) {
+                artist = split_artist;
+                title = split_title;
+                info.meta_set("artist", artist.c_str());
+                info.meta_set("title", title.c_str());
+                MBDB_LOG("split combined title into artist='%s', title='%s'", artist.c_str(), title.c_str());
+            }
+        }
+    }
     apply_custom_fields(handle, info, artist, title);
-    if (!artist.empty()) return true;
-    const auto pos = title.find(" - ");
-    if (pos == std::string::npos || pos == 0) return false;
-    artist = trim(title.substr(0, pos));
-    title = trim(title.substr(pos + 3));
-    if (artist.empty()) return false;
-    MBDB_LOG("split combined title into artist='%s', title='%s'", artist.c_str(), title.c_str());
-    return true;
+    return !artist.empty();
 }
 
 // A MusicBrainz artist id in the tags wins: no title search is needed then.
-bool extract_track_query(const metadb_handle_ptr& handle, const file_info& info, track_query& q) {
+// `dynamic` is true for in-stream metadata updates: `info` then holds only what the
+// stream sent, so the file's own artist/title/MBID tags (often the station's) must not
+// leak into the result. Its other fields are overlaid on the file's tags so that custom
+// patterns using them (e.g. %album artist%) behave the same as for a newly started track.
+bool extract_track_query(const metadb_handle_ptr& handle, const file_info& info, track_query& q,
+                         bool dynamic = false) {
     q = track_query();
+    file_info_impl eff;
+    if (dynamic && handle.is_valid()) {
+        handle->get_info(eff);
+        eff.meta_remove_field("artist");
+        eff.meta_remove_field("title");
+        eff.meta_remove_field("MUSICBRAINZ_ARTISTID");
+        eff.meta_remove_field("MUSICBRAINZ ARTIST ID");
+        for (t_size i = 0; i < info.meta_get_count(); ++i) {
+            const char* name = info.meta_enum_name(i);
+            eff.meta_remove_field(name);
+            for (t_size j = 0; j < info.meta_enum_value_count(i); ++j)
+                eff.meta_add(name, info.meta_enum_value(i, j));
+        }
+    } else {
+        eff.copy(info);
+    }
+
     // Field names are matched case-insensitively. Taggers differ in how they
     // spell the MusicBrainz artist id field.
     static const char* const kMbidFields[] = { "MUSICBRAINZ_ARTISTID", "MUSICBRAINZ ARTIST ID" };
     for (const char* field : kMbidFields) {
-        const char* id = info.meta_get(field, 0); // first value if multi-valued
+        const char* id = eff.meta_get(field, 0); // first value if multi-valued
         if (id == nullptr || *id == 0) continue;
         std::string v = trim(id);
         for (auto& c : v) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
         if (is_mbid(v)) {
             q.artist_mbid = v;
-            const char* a = info.meta_get("artist", 0);
-            const char* t = info.meta_get("title", 0);
-            q.artist = a ? a : "";
-            q.title = t ? t : "";
-            apply_custom_fields(handle, info, q.artist, q.title);
+            // Artist and title are only informational here (labels, logs); split a combined
+            // title the same way as for a name search so the label matches what is shown.
+            std::string artist, title;
+            extract_artist_title(handle, eff, artist, title);
+            q.artist = artist;
+            q.title = title;
             MBDB_LOG("found artist MBID %s in tag '%s'", v.c_str(), field);
             return true;
         }
         MBDB_LOG("ignoring invalid %s tag value '%s'", field, id);
     }
-    return extract_artist_title(handle, info, q.artist, q.title);
+    return extract_artist_title(handle, eff, q.artist, q.title);
 }
 
 // Only copies metadata and schedules work. Network I/O and SQLite access happen
@@ -148,12 +230,19 @@ bool g_stop = false;
 // Reports a batch lookup as finished however run_lookup() exits.
 struct batch_guard {
     explicit batch_guard(bool batch) : batch(batch) {}
-    ~batch_guard() { if (batch) mbdb_activity::batch_item_done(ok); }
+    ~batch_guard() {
+        if (!batch) return;
+        // The last lookup of a batch with at least one success: the playing artist may be stored now.
+        if (mbdb_activity::batch_item_done(ok)) {
+            try { mbdb_reload_now_playing(); } catch (...) {}
+        }
+    }
     bool batch, ok = false;
 };
 
 void run_lookup(const track_query& q) {
     batch_guard guard(q.batch);
+    playing_guard playing(q);
     try {
         // Snapshot the provider so shutdown cannot destroy it mid-lookup.
         auto provider = musicbrainz_db_get_provider();
@@ -173,6 +262,8 @@ void run_lookup(const track_query& q) {
         const long long ms = scope.ms();
         scope.ok = matched;
         guard.ok = matched;
+        playing.ok = matched;
+        playing.mbid = artistMbid;
         if (matched) {
             pfc::string_formatter message;
             if (!q.artist_mbid.empty())
@@ -221,7 +312,9 @@ bool enqueue(const track_query& q) {
 // the worker thread, never inside foobar2000's playback callback or the UI thread.
 bool queue_lookup(const char* source, const track_query& q, bool dedupe) {
     const bool haveMbid = !q.artist_mbid.empty();
-    {
+    // g_last_key follows the playing track only. Batch lookups ("Search selected") must not
+    // touch it, or a stream update could be dropped as "unchanged" because of an unrelated search.
+    if (q.playing) {
         const std::string key = haveMbid ? "mbid:" + q.artist_mbid : q.artist + "\n" + q.title;
         std::lock_guard<std::mutex> lock(g_last_mutex);
         if (dedupe && key == g_last_key) {
@@ -235,7 +328,17 @@ bool queue_lookup(const char* source, const track_query& q, bool dedupe) {
         MBDB_LOG("%s: artist MBID %s from tags, queueing artist lookup (no title search)", source, q.artist_mbid.c_str());
     else
         MBDB_LOG("%s: '%s' - '%s', queueing lookup (artist+title, then artist)", source, q.artist.c_str(), q.title.c_str());
-    if (!enqueue(q)) { MBDB_LOG("%s: shutting down, lookup dropped", source); return false; }
+    track_query job = q;
+    if (job.playing) { // a newer lookup for the playing track supersedes any older one
+        job.play_seq = ++g_play_seq;
+        mbdb_activity::now_playing_set(mbdb_activity::np_searching, describe_query(job).c_str(), "");
+        std::lock_guard<std::mutex> lock(g_last_mutex);
+        g_playing_query = q;
+        g_playing_query.batch = false;
+        g_playing_valid = true;
+        g_np_cleared = false;
+    }
+    if (!enqueue(job)) { MBDB_LOG("%s: shutting down, lookup dropped", source); return false; }
     return true;
 }
 
@@ -265,9 +368,25 @@ void delay_main() {
         track_query q = std::move(g_delay_query);
         g_delay_pending = false;
         lock.unlock();
-        queue_lookup("dynamic info (track, delayed)", q, true);
+        queue_lookup("dynamic info (track, delayed)", q, !g_np_cleared.load());
         lock.lock();
     }
+}
+
+// Clears the Now playing view because the stream metadata changed: results of
+// lookups for the previous metadata are stale from here on and are dropped.
+void clear_now_playing(mbdb_activity::np_state_t state, const char* message) {
+    ++g_play_seq;
+    set_playing_valid(false);
+    g_np_cleared = true;
+    mbdb_activity::now_playing_set(state, message, "");
+}
+
+// Whether `q` differs from the last playing-track lookup that was queued.
+bool metadata_changed(const track_query& q) {
+    const std::string key = !q.artist_mbid.empty() ? "mbid:" + q.artist_mbid : q.artist + "\n" + q.title;
+    std::lock_guard<std::mutex> lock(g_last_mutex);
+    return key != g_last_key;
 }
 
 void schedule_delayed(const track_query& q, unsigned seconds) {
@@ -290,20 +409,33 @@ void cancel_delayed() {
 class musicbrainz_playback_monitor : public play_callback_static {
 public:
     t_uint32 get_flags() override {
-        return flag_on_playback_new_track | flag_on_playback_dynamic_info_track;
+        return flag_on_playback_new_track | flag_on_playback_dynamic_info_track | flag_on_playback_stop;
     }
 
     void on_playback_new_track(metadb_handle_ptr track) override {
         cancel_delayed(); // a pending stream lookup belongs to the previous track
-        if (track.is_empty()) { MBDB_LOG("new track: empty handle, skipping"); return; }
+        ++g_play_seq;     // results for the previous track are stale from here on
+        set_playing_valid(false);
+        forget_last_key();
+        if (track.is_empty()) {
+            MBDB_LOG("new track: empty handle, skipping");
+            mbdb_activity::now_playing_set(mbdb_activity::np_idle, "Nothing is playing.", "");
+            return;
+        }
         file_info_impl info;
-        if (!track->get_info(info)) { MBDB_LOG("new track: get_info failed (not loaded yet?), skipping"); return; }
+        if (!track->get_info(info)) {
+            MBDB_LOG("new track: get_info failed (not loaded yet?), skipping");
+            mbdb_activity::now_playing_set(mbdb_activity::np_not_found, "The track information is not available yet.", "");
+            return;
+        }
         track_query q;
         if (!extract_track_query(track, info, q)) {
             // Normal for a stream that hasn't sent metadata yet; dynamic info will follow.
             MBDB_LOG("new track: no artist MBID or usable artist/title yet, waiting for dynamic info");
+            mbdb_activity::now_playing_set(mbdb_activity::np_not_found, "No usable artist information in the tags yet.", "");
             return;
         }
+        q.playing = true;
         queue_lookup("new track", q, false);
     }
 
@@ -313,23 +445,34 @@ public:
         // The playing track's handle is only needed to evaluate custom field patterns.
         metadb_handle_ptr playing;
         play_control::get()->get_now_playing(playing);
-        if (!extract_track_query(playing, info, q)) {
-            MBDB_LOG("dynamic info (track): no artist MBID or usable artist/title, skipping");
+        if (!extract_track_query(playing, info, q, true)) {
+            MBDB_LOG("dynamic info (track): no artist MBID or usable artist/title, clearing now playing");
+            cancel_delayed(); // a pending lookup belongs to the previous metadata
+            clear_now_playing(mbdb_activity::np_not_found, "No usable artist information in the stream metadata.");
             return;
         }
+        q.playing = true;
         const unsigned delay = mbdb_prefs::dynamic_delay_seconds();
         if (delay > 0) {
             MBDB_LOG("dynamic info (track): '%s' - '%s', lookup in %u s unless the metadata changes again",
                 q.artist.c_str(), q.title.c_str(), delay);
+            if (metadata_changed(q))
+                clear_now_playing(mbdb_activity::np_idle, "The stream metadata changed; waiting before looking it up...");
             schedule_delayed(q, delay);
             return;
         }
         cancel_delayed();
-        queue_lookup("dynamic info (track)", q, true);
+        queue_lookup("dynamic info (track)", q, !g_np_cleared.load());
     }
 
     void on_playback_starting(play_control::t_track_command, bool) override {}
-    void on_playback_stop(play_control::t_stop_reason) override { cancel_delayed(); }
+    void on_playback_stop(play_control::t_stop_reason) override {
+        cancel_delayed();
+        ++g_play_seq;
+        set_playing_valid(false);
+        forget_last_key();
+        mbdb_activity::now_playing_set(mbdb_activity::np_stopped, "Stopped", "");
+    }
     void on_playback_seek(double) override {}
     void on_playback_pause(bool) override {}
     void on_playback_edited(metadb_handle_ptr) override {}
@@ -393,6 +536,24 @@ size_t mbdb_search_tracks(metadb_handle_list_cref items) {
     return queued;
 }
 
+void mbdb_reload_now_playing() {
+    const auto np = mbdb_activity::now_playing();
+    if (np.state == mbdb_activity::np_found) {
+        // Same artist, new revision: the Now playing view drops its content and loads the record again.
+        mbdb_activity::now_playing_set(mbdb_activity::np_found, np.label.c_str(), np.mbid.c_str());
+        return;
+    }
+    if (np.state != mbdb_activity::np_not_found) return; // nothing playing, or a lookup is already pending
+    track_query q;
+    {
+        std::lock_guard<std::mutex> lock(g_last_mutex);
+        if (!g_playing_valid) return; // no lookup was ever made for this track (no usable tags)
+        q = g_playing_query;
+    }
+    // The artist may be in the database now; this only goes to MusicBrainz if it is not.
+    queue_lookup("reload after search", q, false);
+}
+
 void mbdb_cancel_queued() {
     size_t dropped = 0, batch_dropped = 0;
     {
@@ -404,7 +565,8 @@ void mbdb_cancel_queued() {
         }
         g_jobs.clear();
     }
-    mbdb_activity::batch_drop(batch_dropped);
+    const bool batch_succeeded = mbdb_activity::batch_drop(batch_dropped);
+    if (batch_succeeded) mbdb_reload_now_playing(); // cancelling finished a batch that had successes
     char msg[100];
     snprintf(msg, sizeof(msg), "Cancelled %zu queued lookup(s)", dropped);
     mbdb_activity::add_event(mbdb_activity::lvl_warn, msg);

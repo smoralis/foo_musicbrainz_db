@@ -8,6 +8,7 @@
 #define IDC_TITLE_FIELD         1003
 #define IDC_FIELDS_STATUS       1004
 #define IDC_DYNAMIC_DELAY       1005
+#define IDC_RATE_LIMIT          1006
 #define IDC_INFO_TEXT           1010
 #define IDC_RAW_JSON  			1205
 

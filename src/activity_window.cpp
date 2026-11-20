@@ -1,5 +1,6 @@
 #include "activity_window.h"
 #include "activity.h"
+#include "ui_font.h"
 #include "lookup_queue.h"
 #include <windowsx.h>
 #include <algorithm>
@@ -89,9 +90,14 @@ bool activity_window::update_theme() {
         m_host->query_colours(bg, fg);
         font = m_host->query_font();
     }
+    if (!font) font = mbdb_ui_default_font(); // e.g. Columns UI: the font its settings define
     if (!font) font = static_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
 
     const bool changed = bg != m_bg || fg != m_fg || font != m_font;
+    // Marked here (not only in the timer): refresh_theme(), called when the host notifies a
+    // colour or font change, consumes the change, so the timer would never see it. The Now
+    // playing text is rendered into a Rich Edit and must be rebuilt with the new colours.
+    if (changed) m_np_dirty = true;
     if (font != m_font) {
         m_font = font;
         if (m_bold) { DeleteObject(m_bold); m_bold = nullptr; }
@@ -135,6 +141,7 @@ LRESULT activity_window::OnThemeMessage(UINT, WPARAM, LPARAM, BOOL& handled) {
 LRESULT activity_window::OnCreate(UINT, WPARAM, LPARAM, BOOL&) {
     update_theme();
     create_search();
+    create_info();
     m_search.SetFont(m_font);
     m_db_size = db_file_size(mbdb_activity::stats().db_path);
     SetTimer(kTimerId, kTimerMs);
@@ -152,6 +159,7 @@ LRESULT activity_window::OnDestroy(UINT, WPARAM, LPARAM, BOOL& handled) {
 LRESULT activity_window::OnTimer(UINT, WPARAM wp, LPARAM, BOOL& handled) {
     if (wp != kTimerId) { handled = FALSE; return 0; }
     bool dirty = update_theme(); // also catches dark/light switches the host did not notify us about
+    if (dirty) m_np_dirty = true; // the Now playing view re-renders with the new colours
     if ((++m_ticks % 8) == 0) {  // about every 2 s
         const auto size = db_file_size(mbdb_activity::stats().db_path);
         if (size != m_db_size) { m_db_size = size; dirty = true; }
@@ -159,6 +167,8 @@ LRESULT activity_window::OnTimer(UINT, WPARAM wp, LPARAM, BOOL& handled) {
     const uint64_t v = mbdb_activity::version();
     if (v != m_version) { m_version = v; dirty = true; }
     if (poll_reload()) dirty = true;
+    if (poll_nowplaying()) dirty = true;
+    if (m_view == 2 && m_np_dirty) { render_nowplaying(); m_np_dirty = false; dirty = true; }
     if (m_view == 1 && !m_reload && m_rows_revision != mbdb_activity::db_revision()) reload_artists();
     if (mbdb_activity::working()) dirty = true; // animates the "Working..." dots
     if (mbdb_activity::searching()) dirty = true; // animates the "Searching..." dots
@@ -193,7 +203,7 @@ LRESULT activity_window::OnMouseWheel(UINT, WPARAM wp, LPARAM, BOOL&) {
 // ---------------------------------------------------------------- buttons --
 
 int activity_window::hit_test(POINT pt) const {
-    for (int i = 0; i < 5; ++i) if (PtInRect(&m_btn[i], pt)) return i;
+    for (int i = 0; i < 6; ++i) if (PtInRect(&m_btn[i], pt)) return i;
     return -1;
 }
 
@@ -202,6 +212,7 @@ bool activity_window::button_enabled(int index) const {
     case 1: return mbdb_activity::stats().queued > 0; // "Cancel" needs something queued
     case 2: return m_view == 1 && selected_count() > 0;
     case 3: return m_view == 1 && !m_rows.empty();
+    case 5: return m_view == 2 && m_np_has_record && m_np_content && mbdb_info_has_raw(*m_np_content);
     default: return true;
     }
 }
@@ -212,6 +223,7 @@ void activity_window::activate_button(int index) {
     else if (index == 2) delete_selected();
     else if (index == 3) export_json(false);
     else if (index == 4) reload_artists();
+    else if (index == 5) { m_np_raw = !m_np_raw; m_np_dirty = true; Invalidate(FALSE); }
 }
 
 LRESULT activity_window::OnMouseMove(UINT, WPARAM, LPARAM lp, BOOL&) {
@@ -221,6 +233,9 @@ LRESULT activity_window::OnMouseMove(UINT, WPARAM, LPARAM lp, BOOL&) {
         TrackMouseEvent(&tme);
         m_tracking = true;
     }
+    if (m_sb_dragging) { scrollbar_mouse_move(pt); return 0; }
+    const bool sb_hot = PtInRect(&m_sb_track, pt) != 0;
+    if (sb_hot != m_sb_hot) { m_sb_hot = sb_hot; Invalidate(FALSE); }
     const int hot = hit_test(pt);
     if (hot != m_hot) { m_hot = hot; Invalidate(FALSE); }
     return 0;
@@ -229,12 +244,14 @@ LRESULT activity_window::OnMouseMove(UINT, WPARAM, LPARAM lp, BOOL&) {
 LRESULT activity_window::OnMouseLeave(UINT, WPARAM, LPARAM, BOOL&) {
     m_tracking = false;
     if (m_hot != -1) { m_hot = -1; Invalidate(FALSE); }
+    if (m_sb_hot) { m_sb_hot = false; Invalidate(FALSE); }
     return 0;
 }
 
 LRESULT activity_window::OnLButtonDown(UINT, WPARAM, LPARAM lp, BOOL& handled) {
     const POINT pt = { GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
     if (tab_mouse_down(pt)) return 0;
+    if (scrollbar_mouse_down(pt)) return 0;
     const int idx = hit_test(pt);
     if (idx >= 0 && button_enabled(idx)) {
         m_down = idx;
@@ -252,11 +269,12 @@ LRESULT activity_window::OnLButtonDown(UINT, WPARAM, LPARAM lp, BOOL& handled) {
 // had a double-click action, so quick repeated clicks on buttons and tabs still work.
 LRESULT activity_window::OnLButtonDblClk(UINT, WPARAM, LPARAM lp, BOOL& handled) {
     const POINT pt = { GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
-    if (artists_dbl_click(pt)) return 0;
+    if (!PtInRect(&m_sb_track, pt) && artists_dbl_click(pt)) return 0; // the scrollbar is not a row
     return OnLButtonDown(WM_LBUTTONDOWN, 0, lp, handled);
 }
 
 LRESULT activity_window::OnLButtonUp(UINT, WPARAM, LPARAM lp, BOOL& handled) {
+    if (m_sb_dragging) { scrollbar_mouse_up(); return 0; }
     if (m_down < 0) { handled = FALSE; return 0; }
     const int down = m_down;
     m_down = -1;
@@ -306,12 +324,17 @@ void activity_window::on_edit_mode_changed() {
         const bool editing = m_host && m_host->is_edit_mode();
         m_search.ShowWindow(editing || m_view != 1 ? SW_HIDE : SW_SHOW);
     }
+    if (m_info.IsWindow()) {
+        const bool editing = m_host && m_host->is_edit_mode();
+        m_info.ShowWindow(editing || m_view != 2 ? SW_HIDE : SW_SHOW);
+    }
     Invalidate();
 }
 
 LRESULT activity_window::OnContextMenu(UINT, WPARAM, LPARAM lp, BOOL&) {
     POINT pt = { GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
     if (m_view == 1) { artists_context_menu(pt); return 0; }
+    if (m_view == 2) return 0; // the Rich Edit has its own menu
     if (pt.x == -1 && pt.y == -1) GetCursorPos(&pt); // keyboard-invoked
     HMENU menu = CreatePopupMenu();
     AppendMenuW(menu, MF_STRING, 1, L"Copy events");
@@ -363,7 +386,17 @@ void activity_window::paint(HDC dc, const RECT& rc) {
     const auto st = mbdb_activity::stats();
     const int x = pad, right = rc.right - pad;
     int y = pad;
-    for (int i = 2; i < 5; ++i) m_btn[i] = RECT(); // only the artists tab has these buttons
+    for (int i = 2; i < 6; ++i) m_btn[i] = RECT(); // only the artists / now playing tabs have these buttons
+    m_sb_track = RECT(); // set again by draw_scrollbar() when the list is long enough to scroll
+    m_sb_thumb = RECT();
+
+    if (m_np_only) { // standalone "Now playing" panel: no title row, status line or tabs
+        m_btn[0] = RECT();
+        m_btn[1] = RECT();
+        paint_nowplaying(dc, rc, x, right, y, line_h, gap, pad, dpi);
+        SelectObject(dc, old_font);
+        return;
+    }
 
     // Buttons, right-aligned on the title row
     {
@@ -453,14 +486,23 @@ void activity_window::paint(HDC dc, const RECT& rc) {
         y += line_h + MulDiv(4, dpi, 96);
     }
 
-    // The search box belongs to the artists tab only.
-    if (m_view == 0 && m_search.IsWindow() && m_search.IsWindowVisible()) {
+    // The search box belongs to the artists tab, the Rich Edit to the now-playing tab.
+    if (m_view != 1 && m_search.IsWindow() && m_search.IsWindowVisible()) {
         m_search.ShowWindow(SW_HIDE);
         m_search_applied = RECT();
     }
+    if (m_view != 2 && m_info.IsWindow() && m_info.IsWindowVisible()) {
+        m_info.ShowWindow(SW_HIDE);
+        m_info_applied = RECT();
+    }
 
-    // Tabs: Activity | Artists
+    // Tabs: Activity | Artists | Now playing
     paint_tabs(dc, x, right, y, line_h, gap, dpi, st.db_artists);
+    if (m_view == 2) {
+        paint_nowplaying(dc, rc, x, right, y, line_h, gap, pad, dpi);
+        SelectObject(dc, old_font);
+        return;
+    }
     if (m_view == 1) {
         paint_artists(dc, rc, x, right, y, line_h, gap, pad, dpi);
         SelectObject(dc, old_font);
@@ -536,6 +578,12 @@ void activity_window::paint(HDC dc, const RECT& rc) {
     m_max_scroll = total_events > visible ? total_events - visible : 0;
     if (m_scroll > m_max_scroll) m_scroll = m_max_scroll;
 
+    // Leave room for the scrollbar when the feed is longer than the panel.
+    const int sb_width = MulDiv(12, dpi, 96), sb_gap = MulDiv(2, dpi, 96);
+    const bool need_sb = total_events > visible;
+    const int row_right = need_sb ? right - sb_width - sb_gap : right;
+    const int list_top = y;
+
     if (visible > 0) {
         const auto evs = mbdb_activity::events(m_scroll, visible);
         const int time_w = text_width(dc, L"00:00:00") + gap / 2;
@@ -548,15 +596,17 @@ void activity_window::paint(HDC dc, const RECT& rc) {
             default: break;
             }
             draw_text(dc, x, y, x + time_w, line_h, format_time(e), m_dim);
-            draw_text(dc, x + time_w, y, right, line_h, widen(e.text), colour);
+            draw_text(dc, x + time_w, y, row_right, line_h, widen(e.text), colour);
             y += line_h;
         }
         if (m_scroll > 0) {
             // Hint that newer events are above the current view.
             const std::wstring hint = L"scrolled - " + format_count(m_scroll) + L" newer";
             const int hw = text_width(dc, hint);
-            draw_text(dc, right - hw, rc.bottom - pad - line_h, right, line_h, hint, m_dim);
+            draw_text(dc, row_right - hw, rc.bottom - pad - line_h, row_right, line_h, hint, m_dim);
         }
     }
+    if (need_sb && visible > 0)
+        draw_scrollbar(dc, right - sb_width, list_top, rc.bottom - pad, dpi, total_events, visible, m_scroll);
     SelectObject(dc, old_font);
 }

@@ -16,6 +16,8 @@ stats_t g_stats;
 long long g_http_total_ms = 0;
 std::atomic<uint64_t> g_version{1};
 std::atomic<uint64_t> g_db_revision{1};
+now_playing_t g_now_playing;           // guarded by g_mutex
+std::atomic<uint64_t> g_np_revision{1};
 constexpr size_t kMaxEvents = 1000;
 
 ULONGLONG g_batch_start = 0, g_batch_end = 0;
@@ -108,6 +110,24 @@ bool searching() {
 }
 
 uint64_t version() { return g_version.load(std::memory_order_relaxed); }
+void now_playing_set(np_state_t state, const char* label, const char* mbid) {
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        g_now_playing.state = state;
+        g_now_playing.label = label ? label : "";
+        g_now_playing.mbid = mbid ? mbid : "";
+        g_now_playing.revision = g_np_revision.fetch_add(1, std::memory_order_relaxed) + 1;
+    }
+    bump();
+}
+
+now_playing_t now_playing() {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    return g_now_playing;
+}
+
+uint64_t now_playing_revision() { return g_np_revision.load(std::memory_order_relaxed); }
+
 uint64_t db_revision() { return g_db_revision.load(std::memory_order_relaxed); }
 
 void batch_add(size_t count) {
@@ -126,26 +146,36 @@ void batch_add(size_t count) {
     bump();
 }
 
-void batch_item_done(bool ok) {
+bool batch_item_done(bool ok) {
+    bool succeeded = false;
     {
         std::lock_guard<std::mutex> lock(g_mutex);
         ++g_stats.batch_done;
         if (!ok) ++g_stats.batch_failed;
-        if (g_stats.batch_done >= g_stats.batch_total) g_batch_end = GetTickCount64();
+        if (g_stats.batch_done >= g_stats.batch_total) {
+            g_batch_end = GetTickCount64();
+            succeeded = g_stats.batch_done > g_stats.batch_failed;
+        }
     }
     bump();
+    return succeeded;
 }
 
-void batch_drop(size_t count) {
-    if (count == 0) return;
+bool batch_drop(size_t count) {
+    if (count == 0) return false;
+    bool succeeded = false;
     {
         std::lock_guard<std::mutex> lock(g_mutex);
         g_stats.batch_total = g_stats.batch_total > count ? g_stats.batch_total - count : 0;
         if (g_stats.batch_total < g_stats.batch_done) g_stats.batch_total = g_stats.batch_done;
         g_stats.batch_cancelled = true;
-        if (g_stats.batch_total > 0 && g_stats.batch_done >= g_stats.batch_total) g_batch_end = GetTickCount64();
+        if (g_stats.batch_total > 0 && g_stats.batch_done >= g_stats.batch_total) {
+            g_batch_end = GetTickCount64();
+            succeeded = g_stats.batch_done > g_stats.batch_failed;
+        }
     }
     bump();
+    return succeeded;
 }
 
 bool batch_visible() {

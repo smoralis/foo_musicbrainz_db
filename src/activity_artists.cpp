@@ -236,11 +236,12 @@ void activity_window::artists_context_menu(POINT screen_pt) {
 // ----------------------------------------------------------------- input ---
 
 bool activity_window::tab_mouse_down(POINT pt) {
-    for (int i = 0; i < 2; ++i) {
+    for (int i = 0; i < 3; ++i) {
         if (!PtInRect(&m_tab[i], pt)) continue;
         if (m_view != i) {
             m_view = i;
             if (i == 1 && (!m_rows_loaded || m_rows_revision != mbdb_activity::db_revision())) reload_artists();
+            if (i == 2) m_np_dirty = true; // render the playing artist when the tab opens
             Invalidate(FALSE);
         }
         return true;
@@ -379,12 +380,13 @@ void activity_window::draw_button(HDC dc, int index, const std::wstring& label) 
 }
 
 void activity_window::paint_tabs(HDC dc, int x, int right, int& y, int line_h, int gap, int dpi, long long db_artists) {
-    const std::wstring labels[2] = {
+    const std::wstring labels[3] = {
         L"Activity",
-        db_artists >= 0 ? L"Artists (" + format_count(static_cast<unsigned long long>(db_artists)) + L")" : std::wstring(L"Artists") };
+        db_artists >= 0 ? L"Artists (" + format_count(static_cast<unsigned long long>(db_artists)) + L")" : std::wstring(L"Artists"),
+        L"Now playing" };
     const int padx = MulDiv(12, dpi, 96);
     int tx = x;
-    for (int i = 0; i < 2; ++i) {
+    for (int i = 0; i < 3; ++i) {
         const bool active = m_view == i;
         SelectObject(dc, active && m_bold ? m_bold : m_font);
         const int w = text_width(dc, labels[i]) + 2 * padx;
@@ -449,18 +451,26 @@ void activity_window::paint_artists(HDC dc, const RECT& rc, int x, int right, in
         y += sh + MulDiv(4, dpi, 96);
     }
 
+    // Reserve room for the scrollbar when the table is longer than the panel.
+    const int sb_width = MulDiv(12, dpi, 96), sb_gap = MulDiv(2, dpi, 96);
+    const int first_row_top = y + line_h; // the header row sits above the rows
+    const int avail_rows = rc.bottom - pad - first_row_top;
+    const size_t fit_rows = avail_rows > 0 ? static_cast<size_t>(avail_rows / line_h) : 0;
+    const bool need_sb = m_order.size() > fit_rows;
+    const int cols_right = need_sb ? right - sb_width - sb_gap : right;
+
     // Columns: Name | Country | MBID
     const int mbid_w = text_width(dc, L"00000000-0000-0000-0000-000000000000") + gap;
     const int country_w = text_width(dc, L"Country") + 2 * gap;
     const int min_name = MulDiv(80, dpi, 96);
-    const int name_w = (std::max)(min_name, (right - x) - mbid_w - country_w);
+    const int name_w = (std::max)(min_name, (cols_right - x) - mbid_w - country_w);
     m_col_x[0] = x;
     m_col_x[1] = x + name_w;
     m_col_x[2] = m_col_x[1] + country_w;
-    m_col_x[3] = right;
+    m_col_x[3] = cols_right;
 
     // Header (click to sort)
-    m_header_rc = { x, y, right, y + line_h };
+    m_header_rc = { x, y, cols_right, y + line_h };
     {
         HBRUSH hb = CreateSolidBrush(mix(m_fg, m_bg, 10));
         FillRect(dc, &m_header_rc, hb);
@@ -478,7 +488,7 @@ void activity_window::paint_artists(HDC dc, const RECT& rc, int x, int right, in
 
     // Rows
     m_row_h = line_h;
-    m_list_rc = { x, y, right, rc.bottom - pad };
+    m_list_rc = { x, y, cols_right, rc.bottom - pad };
     const int avail = m_list_rc.bottom - m_list_rc.top;
     m_visible_rows = avail > 0 ? static_cast<size_t>(avail / line_h) : 0;
     const size_t n = m_order.size();
@@ -498,7 +508,7 @@ void activity_window::paint_artists(HDC dc, const RECT& rc, int x, int right, in
         const size_t id = m_order[pos];
         const artist_list_item& a = m_rows[id];
         const int ry = m_list_rc.top + static_cast<int>(i) * line_h;
-        RECT row = { x, ry, right, ry + line_h };
+        RECT row = { x, ry, cols_right, ry + line_h };
         const bool selected = m_sel[id] != 0;
         if (selected) {
             HBRUSH sb = CreateSolidBrush(mix(m_accent, m_bg, 35));
@@ -510,6 +520,8 @@ void activity_window::paint_artists(HDC dc, const RECT& rc, int x, int right, in
         draw_text(dc, m_col_x[2] + gap / 2, ry, m_col_x[3], line_h, widen(a.mbid), selected ? m_fg : m_dim);
         if (focused && static_cast<long long>(pos) == m_focus) DrawFocusRect(dc, &row);
     }
+    if (need_sb)
+        draw_scrollbar(dc, right - sb_width, m_list_rc.top, m_list_rc.bottom, dpi, n, m_visible_rows, m_ascroll);
 }
 
 // ---------------------------------------------------------- search box -----

@@ -16,6 +16,9 @@ public:
     bool initialize();
     bool save_artist(const artist_record& artist);
     bool get_artist(const std::string& mbid, artist_record& artist);
+    // Artists already stored (with their full record) under this name, compared
+    // case-insensitively. Returns how many match, capped at 2; `mbid` is the first.
+    int find_artists_by_name(const std::string& name, std::string& mbid);
     long long count_artists(); // -1 on error
     // Used by the panel's artist table (UI thread). All public calls are serialized.
     bool list_artists(std::vector<artist_list_item>& out);                 // ordered by name

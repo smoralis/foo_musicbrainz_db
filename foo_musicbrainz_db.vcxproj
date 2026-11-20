@@ -95,6 +95,8 @@
     <ClCompile Include="src\debug_log.cpp" />
     <ClCompile Include="src\preferences.cpp" />
     <ClCompile Include="src\artist_info_window.cpp" />
+    <ClCompile Include="src\activity_scrollbar.cpp" />
+    <ClCompile Include="src\activity_nowplaying.cpp" />
     <ClCompile Include="src\initquit.cpp" />
     <ClCompile Include="src\playback_monitor.cpp" />
     <ClCompile Include="src\database.cpp" />

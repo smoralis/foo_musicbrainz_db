@@ -3,7 +3,7 @@
 
 // Child dialog hosted by Preferences > Tools > MusicBrainz DB.
 // Sizes are in dialog units, so the page scales with DPI and the UI font.
-IDD_MBDB_PREFS DIALOGEX 0, 0, 270, 200
+IDD_MBDB_PREFS DIALOGEX 0, 0, 270, 236
 STYLE DS_SETFONT | WS_CHILD
 FONT 8, "MS Shell Dlg", 0, 0, 0x0
 BEGIN
@@ -26,6 +26,11 @@ BEGIN
     LTEXT           "&Delay search by:", IDC_STATIC, 12, 178, 64, 8
     EDITTEXT        IDC_DYNAMIC_DELAY, 78, 176, 30, 13, ES_AUTOHSCROLL | ES_NUMBER
     LTEXT           "seconds (0 = search immediately)", IDC_STATIC, 114, 178, 138, 8
+
+    GROUPBOX        "MusicBrainz requests", IDC_STATIC, 4, 200, 256, 32
+    LTEXT           "&Rate limit: wait", IDC_STATIC, 12, 214, 64, 8
+    EDITTEXT        IDC_RATE_LIMIT, 78, 212, 30, 13, ES_AUTOHSCROLL | ES_NUMBER
+    LTEXT           "seconds between requests (minimum 1)", IDC_STATIC, 114, 214, 138, 8
 END
 
 // Modeless window opened by double-clicking an artist in the panel's artists tab.
