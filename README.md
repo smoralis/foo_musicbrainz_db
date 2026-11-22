@@ -43,7 +43,7 @@ The window follows the host's light/dark colours and font where available. It ha
 
 - **Activity:** shows current lookup/task status, database artist count and size, lookup success/failure totals, queued lookups, cache hits/misses and hit rate, HTTP request/failure/throttling counts, last HTTP status and average request duration. It also shows the event feed. Events can be copied or cleared from its context menu.
 - **Artists:** browses the artists currently cached in SQLite. The list shows artist name, country and type; clicking a column header sorts by that column. A search box filters by artist name, country or MBID.
-- **Now playing:** shows the stored MusicBrainz record of the playing track's artist, with the same sections and links as the artist info window. The first row reads **Now Playing : artist**; the second row holds the **Show raw JSON** button. It follows track changes and stream metadata updates, and shows what it is doing while the lookup runs (or that nothing is playing or nothing was found). When playback stops the view is blank and the first row reads **Now Playing : Stopped**. The view is also cleared when playback stops and when stream metadata changes (while a configured delay is running it shows that it is waiting); a stream that returns to the same song after a jingle is looked up again. When a **Search selected** run finishes with at least one success, the view reloads, so a playing artist that was just stored shows up without waiting for the next track.
+- **Now playing:** shows the stored MusicBrainz record of the playing track's artist, with the same sections and links as the artist info window. The content area is split into two panes: artist information occupies **30% of the width on the left**, while an embedded **WebView2 browser occupies 70% on the right**. The first row reads **Now Playing : artist**; the second row holds the **Show raw JSON** button. It follows track changes and stream metadata updates, and shows what it is doing while the lookup runs (or that nothing is playing or nothing was found). Clicking supported HTTP/HTTPS links or MusicBrainz artist IDs in the artist information pane navigates to the corresponding page inside the embedded browser. When playback stops the view is blank and the first row reads **Now Playing : Stopped**. The view is also cleared when playback stops and when stream metadata changes (while a configured delay is running it shows that it is waiting); a stream that returns to the same song after a jingle is looked up again. When a **Search selected** run finishes with at least one success, the view reloads, so a playing artist that was just stored shows up without waiting for the next track.
 
 The Artists tab supports standard multi-selection (Ctrl-click and Shift-click), keyboard navigation, and these actions:
 
@@ -127,9 +127,11 @@ Requirements:
 - foobar2000 SDK, with this project placed in the SDK's `foobar2000` folder as `foo_musicbrainz_db`
 - SQLite3 and nlohmann/json (for example via vcpkg)
 - WTL (restored through NuGet; the project expects `packages\wtl.10.1.0`)
+- **Microsoft WebView2 SDK/runtime** (NuGet package `Microsoft.Web.WebView2`; the project uses the WebView2 native headers and loader)																																												  
 - The SDK's `shared-x64.lib` / `shared-Win32.lib`
 - Columns UI SDK headers/library for the Columns UI panel integration
 
+The WebView2 browser requires the **Microsoft Edge WebView2 Runtime** to be installed on the system. It is included with many Windows installations, but may need to be installed separately on some systems.
 Open `foo_musicbrainz_db.sln` and build the desired configuration. The project file defines Debug/Release for Win32 and x64; the usual release build is `Release|x64`.
 
 To remove all debug logging from the binary entirely, set `MBDB_DEBUG_LOG` to `0` in `src/debug_log.h` or in the project's preprocessor definitions.
