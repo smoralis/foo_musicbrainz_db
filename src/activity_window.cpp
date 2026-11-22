@@ -142,6 +142,7 @@ LRESULT activity_window::OnCreate(UINT, WPARAM, LPARAM, BOOL&) {
     update_theme();
     create_search();
     create_info();
+	m_webview.create(m_hWnd);
     m_search.SetFont(m_font);
     m_db_size = db_file_size(mbdb_activity::stats().db_path);
     SetTimer(kTimerId, kTimerMs);
@@ -150,6 +151,7 @@ LRESULT activity_window::OnCreate(UINT, WPARAM, LPARAM, BOOL&) {
 
 LRESULT activity_window::OnDestroy(UINT, WPARAM, LPARAM, BOOL& handled) {
     KillTimer(kTimerId);
+	m_webview.close();
     if (m_bold) { DeleteObject(m_bold); m_bold = nullptr; }
     if (m_edit_brush) { DeleteObject(m_edit_brush); m_edit_brush = nullptr; }
     handled = FALSE;
@@ -328,6 +330,10 @@ void activity_window::on_edit_mode_changed() {
         const bool editing = m_host && m_host->is_edit_mode();
         m_info.ShowWindow(editing || m_view != 2 ? SW_HIDE : SW_SHOW);
     }
+	
+    const bool editing = m_host && m_host->is_edit_mode();
+	m_webview.show(!editing && m_view == 2);
+	
     Invalidate();
 }
 
@@ -492,7 +498,8 @@ void activity_window::paint(HDC dc, const RECT& rc) {
         m_search_applied = RECT();
     }
     if (m_view != 2 && m_info.IsWindow() && m_info.IsWindowVisible()) {
-        m_info.ShowWindow(SW_HIDE);
+        m_webview.show(false);
+		m_info.ShowWindow(SW_HIDE);
         m_info_applied = RECT();
     }
 

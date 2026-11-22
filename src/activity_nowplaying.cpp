@@ -7,6 +7,7 @@
 #include "artist_table.h"
 #include "bg_tasks.h"
 #include <memory>
+#include <algorithm>
 
 using namespace actutil;
 
@@ -140,12 +141,27 @@ void activity_window::render_nowplaying() {
 }
 
 // Link clicks inside the Rich Edit arrive as WM_NOTIFY to the panel.
-LRESULT activity_window::OnNotify(UINT, WPARAM, LPARAM lp, BOOL& handled) {
+LRESULT activity_window::OnNotify(
+    UINT,
+    WPARAM,
+    LPARAM lp,
+    BOOL& handled
+) {
     auto* hdr = reinterpret_cast<LPNMHDR>(lp);
-    if (hdr && m_info.IsWindow() && hdr->hwndFrom == m_info.m_hWnd && hdr->code == EN_LINK) {
-        mbdb_info_open_link(hdr);
+
+    if (hdr &&
+        m_info.IsWindow() &&
+        hdr->hwndFrom == m_info.m_hWnd &&
+        hdr->code == EN_LINK) {
+
+        const std::wstring url = mbdb_info_get_link(hdr);
+
+        if (!url.empty())
+            m_webview.navigate(url);
+
         return 0;
     }
+
     handled = FALSE;
     return 0;
 }
@@ -179,11 +195,54 @@ void activity_window::paint_nowplaying(HDC dc, const RECT& rc, int x, int right,
     draw_button(dc, 5, m_np_raw ? L"Hide raw JSON" : L"Show raw JSON");
     y += line_h + row_gap;
 
-    const RECT info = { x, y, right, rc.bottom - pad };
-    if (m_info.IsWindow()) {
-        if (info.bottom - info.top > MulDiv(20, dpi, 96) && info.right - info.left > MulDiv(20, dpi, 96))
-            position_info(info);
-    } else {
-        draw_text(dc, x, y, right, line_h, L"The Rich Edit control is not available on this system.", m_dim);
-    }
+const int available_width = (std::max)(0, right - x);
+const int np_gap = MulDiv(8, dpi, 96);
+const int split = available_width * 30 / 100;
+
+const int left_right = (std::max)(x, x + split - np_gap / 2);
+const int right_left = (std::min)(right, x + split + np_gap / 2);
+
+const RECT info = {
+    x,
+    y,
+    left_right,
+    rc.bottom - pad
+};
+
+const RECT webpage = {
+    right_left,
+    y,
+    right,
+    rc.bottom - pad
+};
+
+const int min_width = MulDiv(20, dpi, 96);
+const int min_height = MulDiv(20, dpi, 96);
+
+const bool valid_info =
+    info.right - info.left > min_width &&
+    info.bottom - info.top > min_height;
+
+const bool valid_webpage =
+    webpage.right - webpage.left > min_width &&
+    webpage.bottom - webpage.top > min_height;
+
+if (m_info.IsWindow()) {
+    if (valid_info)
+        position_info(info);
+}
+else if (valid_info) {
+    // Keep your existing unavailable-Rich-Edit message here,
+    // but draw it using the left-hand "info" rectangle.
+}
+
+if (valid_webpage) {
+    m_webview.set_bounds(webpage);
+
+    const bool editing = m_host && m_host->is_edit_mode();
+    m_webview.show(!editing && m_view == 2);
+}
+else {
+    m_webview.show(false);
+}
 }

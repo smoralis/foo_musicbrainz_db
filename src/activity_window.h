@@ -6,6 +6,7 @@
 #include <string>
 #include <vector>
 #include "../include/musicbrainz_db_types.h"
+#include "activity_webview.h"
 
 // Result of a background "list artists" request, polled by the window's timer.
 struct activity_reload_state {
@@ -181,6 +182,8 @@ private:
     std::shared_ptr<const mbdb_info_content> m_np_content; // ready-to-render sections for the record
     std::shared_ptr<activity_np_fetch> m_np_fetch;
     bool m_tracking = false;
+	activity_webview m_webview;
+		
     // Artists tab
     bool m_np_only = false;                 // standalone Now playing panel
     int m_view = 0;                         // 0 = activity, 1 = artists
@@ -205,4 +208,5 @@ private:
     int m_col_x[4] = {};
     int m_row_h = 0;
     bool m_batch_was_visible = false; // so the timer repaints once more when the bar hides
+	
 };

@@ -28,5 +28,10 @@ void mbdb_info_render(HWND edit, const mbdb_info_content& content, bool show_raw
 void mbdb_info_render_message(HWND edit, const std::string& message, bool dark,
                               COLORREF background, COLORREF text, HFONT font);
 
-// Call from the parent's WM_NOTIFY handler for EN_LINK: opens the clicked link.
+// Returns the validated URL represented by an EN_LINK notification.
+// Returns an empty string if the notification is not a supported link.
+std::wstring mbdb_info_get_link(LPNMHDR hdr);
+
+// Opens the clicked link in the external browser.
 void mbdb_info_open_link(LPNMHDR hdr);
+

@@ -823,19 +823,20 @@ namespace {
         ::InvalidateRect(edit, nullptr, TRUE);
     }
 
-    // Opens the web page behind a clicked link (EN_LINK notification).
-    void open_link(LPNMHDR hdr) {
+    // Move get_link_target out of open_link to file scope (inside the anonymous namespace)
+    std::wstring get_link_target(LPNMHDR hdr) {
+        if (!hdr)
+            return {};
+
         auto* link = reinterpret_cast<ENLINK*>(hdr);
 
-        if (link->msg != WM_LBUTTONUP) {
-            return;
-        }
+        if (link->msg != WM_LBUTTONUP)
+            return {};
 
         const LONG len = link->chrg.cpMax - link->chrg.cpMin;
 
-        if (len <= 0 || len > 2048) {
-            return;
-        }
+        if (len <= 0 || len > 2048)
+            return {};
 
         std::wstring url(static_cast<size_t>(len) + 1, L'\0');
 
@@ -843,21 +844,29 @@ namespace {
         range.chrg = link->chrg;
         range.lpstrText = url.data();
 
-        ::SendMessage(hdr->hwndFrom, EM_GETTEXTRANGE, 0, reinterpret_cast<LPARAM>(&range));
+        ::SendMessage(
+            hdr->hwndFrom,
+            EM_GETTEXTRANGE,
+            0,
+            reinterpret_cast<LPARAM>(&range)
+        );
 
         url.resize(static_cast<size_t>(len));
 
-        std::wstring target;
+        if (is_web_url(url))
+            return url;
 
-        if (is_web_url(url)) {
-            target = url;
-        }
-        else if (is_mbid(url)) {
-            target = L"https://musicbrainz.org/artist/" + url;
-        }
+        if (is_mbid(url))
+            return L"https://musicbrainz.org/artist/" + url;
 
-        if (!target.empty()) {
-            ::ShellExecuteW(nullptr, L"open", target.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+        return {};
+    }
+
+    // Opens the web page behind a clicked link (EN_LINK notification).
+    void open_link(LPNMHDR hdr) {
+        std::wstring url = get_link_target(hdr);
+        if (!url.empty()) {
+            ::ShellExecuteW(nullptr, L"open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
         }
     }
 
@@ -1417,6 +1426,11 @@ void mbdb_info_render_message(HWND edit, const std::string& message, bool dark,
     render_in_panel(edit, doc, dark, background, text, font);
 }
 
+std::wstring mbdb_info_get_link(LPNMHDR hdr) {
+    return get_link_target(hdr);
+}
+
 void mbdb_info_open_link(LPNMHDR hdr) {
-    if (hdr) open_link(hdr);
+    if (hdr)
+        open_link(hdr);
 }
