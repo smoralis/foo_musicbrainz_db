@@ -171,6 +171,7 @@ Please treat the database as read-only and do not write to it. The schema versio
 ## Applications/components using the db
 
 foo_countryflags https://github.com/smoralis/foo_countryflags
+
 Musicbrainz_db webview https://hydrogenaudio.org/index.php/topic,126243.msg1090234.html#msg1090234
 
 ## Privacy and network use
