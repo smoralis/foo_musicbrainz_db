@@ -103,7 +103,7 @@ Open **Preferences > Tools > MusicBrainz DB**.
 | Artist field | Optional foobar2000 title-formatting pattern used instead of the plain artist metadata field. Empty means use the tag. |
 | Title field | Optional title-formatting pattern used instead of the plain title metadata field. Empty means use the tag. |
 | Dynamic info delay (seconds) | Waits 0–300 seconds after stream metadata changes before queuing a lookup. Every newer update restarts the wait; `0` looks up immediately. |
-| Rate limit (seconds) | Minimum time between two MusicBrainz requests. Default 2; values below 1 are not accepted (MusicBrainz allows an average of one request per second). |
+| Rate limit (seconds) | Minimum delay between MusicBrainz requests. Default 2 seconds. The HTTP client enforces a safety minimum of 1.1 seconds even if a lower value reaches it. |
 
 For streams that send a combined "Artist - Title" title, the title is split first and the custom patterns are evaluated against the split artist and title. For in-stream metadata updates, the file's own artist, title and MusicBrainz artist ID tags are ignored; its other tags (for example album artist) stay available to the patterns.
 
@@ -111,7 +111,11 @@ Invalid or empty custom patterns fall back to the corresponding plain metadata t
 
 ## MusicBrainz requests and rate limiting
 
-Requests are made over HTTPS to `musicbrainz.org`. The client spaces requests by at least the configured rate limit (2 seconds by default, never less than 1 second; see Preferences) and handles HTTP 429/503 responses with retries and the server's `Retry-After` back-off when provided. HTTP requests use finite connection/send/receive timeouts. The Activity view reports request status, duration, failures and throttling.
+Requests are made over HTTPS to `musicbrainz.org`. The client serializes requests globally, so only one MusicBrainz HTTP request is active at a time, including while a request is being retried. The delay between requests is at least the configured rate limit (2 seconds by default), with a client-side safety minimum of 1.1 seconds.
+
+The HTTP client reuses a persistent WinHTTP session and applies finite connection, send and receive timeouts. HTTP 429, 502, 503 and 504 responses are treated as temporary failures and retried up to three times (four attempts total). For `Retry-After`, both delay-seconds and HTTP-date formats are understood. When the server does not provide a usable `Retry-After` value, the client uses exponential back-off with jitter. The resulting cooldown is shared by all queued lookups. Other HTTP errors and transport failures are reported without automatic retry.
+
+The Activity view reports each HTTP attempt, including its status, duration, failures and throttling. Cancelling queued lookups does not interrupt a request already in progress. The client shutdown flag stops callers waiting for a request slot; an in-progress WinHTTP operation is bounded by its configured timeouts.
 
 Before distributing a build, replace the placeholder contact details in the `User-Agent` string in `src/musicbrainz_client.cpp` with a valid project or maintainer contact. MusicBrainz asks API clients to identify themselves.
 
@@ -162,6 +166,12 @@ Please treat the database as read-only and do not write to it. The schema versio
 `include/musicbrainz_db_interface.h` describes a lookup contract (`search_artist_title`, `get_artist_country`, `get_artist_json`). The provider implements this interface internally, but the header explicitly describes it as a conceptual contract: it is not registered as a foobar2000 service and cannot currently be called across components.
 
 `include/musicbrainz_db_types.h` defines the lightweight artist-list row (`mbid`, `name`, `country`, `type`) and artist record, including the full raw JSON response.
+
+
+## Applications/components using the db
+
+foo_countryflags https://github.com/smoralis/foo_countryflags
+Musicbrainz_db webview https://hydrogenaudio.org/index.php/topic,126243.msg1090234.html#msg1090234
 
 ## Privacy and network use
 

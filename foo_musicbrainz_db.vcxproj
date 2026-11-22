@@ -121,6 +121,9 @@
     <ClInclude Include="src\resource.h" />
   </ItemGroup>
   <ItemGroup>
+    <ProjectReference Include="..\..\columns_ui-sdk\columns_ui-sdk-public.vcxproj">
+      <Project>{93ec0ede-01cd-4fb0-b8e8-4f2a027e026e}</Project>
+    </ProjectReference>
     <ProjectReference Include="..\foobar2000_component_client\foobar2000_component_client.vcxproj" />
     <ProjectReference Include="..\SDK\foobar2000_SDK.vcxproj" />
     <ProjectReference Include="..\helpers\foobar2000_SDK_helpers.vcxproj" />
