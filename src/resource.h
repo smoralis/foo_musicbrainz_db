@@ -9,6 +9,9 @@
 #define IDC_FIELDS_STATUS       1004
 #define IDC_DYNAMIC_DELAY       1005
 #define IDC_RATE_LIMIT          1006
+#define IDC_LB_ALGORITHM        1007
+#define IDC_LB_LOAD_ALGORITHMS   1008
+#define IDC_LB_ALGORITHM_STATUS 1009
 #define IDC_INFO_TEXT           1010
 #define IDC_RAW_JSON  			1205
 

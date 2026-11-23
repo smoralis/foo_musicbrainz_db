@@ -169,6 +169,7 @@ LRESULT activity_window::OnTimer(UINT, WPARAM wp, LPARAM, BOOL& handled) {
     const uint64_t v = mbdb_activity::version();
     if (v != m_version) { m_version = v; dirty = true; }
     if (poll_reload()) dirty = true;
+    if (poll_similar_artists()) dirty = true;
     if (poll_nowplaying()) dirty = true;
     if (m_view == 2 && m_np_dirty) { render_nowplaying(); m_np_dirty = false; dirty = true; }
     if (m_view == 1 && !m_reload && m_rows_revision != mbdb_activity::db_revision()) reload_artists();
@@ -205,7 +206,7 @@ LRESULT activity_window::OnMouseWheel(UINT, WPARAM wp, LPARAM, BOOL&) {
 // ---------------------------------------------------------------- buttons --
 
 int activity_window::hit_test(POINT pt) const {
-    for (int i = 0; i < 6; ++i) if (PtInRect(&m_btn[i], pt)) return i;
+    for (int i = 0; i < 8; ++i) if (PtInRect(&m_btn[i], pt)) return i;
     return -1;
 }
 
@@ -214,6 +215,8 @@ bool activity_window::button_enabled(int index) const {
     case 1: return mbdb_activity::stats().queued > 0; // "Cancel" needs something queued
     case 2: return m_view == 1 && selected_count() > 0;
     case 3: return m_view == 1 && !m_rows.empty();
+    case 7: return m_view == 1 && selected_count() > 0;
+    case 6: return m_view == 1 && !m_similar_loading && !similar_missing_mbids().empty();
     case 5: return m_view == 2 && m_np_has_record && m_np_content && mbdb_info_has_raw(*m_np_content);
     default: return true;
     }
@@ -225,6 +228,8 @@ void activity_window::activate_button(int index) {
     else if (index == 2) delete_selected();
     else if (index == 3) export_json(false);
     else if (index == 4) reload_artists();
+    else if (index == 6) download_similar_artists();
+    else if (index == 7) download_similar_of_selected();
     else if (index == 5) { m_np_raw = !m_np_raw; m_np_dirty = true; Invalidate(FALSE); }
 }
 
@@ -234,6 +239,18 @@ LRESULT activity_window::OnMouseMove(UINT, WPARAM, LPARAM lp, BOOL&) {
         TRACKMOUSEEVENT tme = { sizeof(tme), TME_LEAVE, m_hWnd, 0 };
         TrackMouseEvent(&tme);
         m_tracking = true;
+    }
+    if (m_similar_sb_dragging) {
+        const int track_h = m_similar_sb_track.bottom - m_similar_sb_track.top;
+        const int thumb_h = m_similar_sb_thumb.bottom - m_similar_sb_thumb.top;
+        const int travel = track_h - thumb_h;
+        if (travel > 0) {
+            const int thumb_top = (std::max)(m_similar_sb_track.top, (std::min)(pt.y - m_similar_sb_grab, m_similar_sb_track.bottom - thumb_h));
+            const double fraction = static_cast<double>(thumb_top - m_similar_sb_track.top) / travel;
+            m_similar_scroll = static_cast<size_t>(fraction * m_similar_max_scroll + 0.5);
+            Invalidate(FALSE);
+        }
+        return 0;
     }
     if (m_sb_dragging) { scrollbar_mouse_move(pt); return 0; }
     const bool sb_hot = PtInRect(&m_sb_track, pt) != 0;
@@ -253,6 +270,7 @@ LRESULT activity_window::OnMouseLeave(UINT, WPARAM, LPARAM, BOOL&) {
 LRESULT activity_window::OnLButtonDown(UINT, WPARAM, LPARAM lp, BOOL& handled) {
     const POINT pt = { GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
     if (tab_mouse_down(pt)) return 0;
+    if (m_view == 1 && PtInRect(&m_similar_rc, pt) && !PtInRect(&m_btn[6], pt) && artists_mouse_down(pt)) return 0;
     if (scrollbar_mouse_down(pt)) return 0;
     const int idx = hit_test(pt);
     if (idx >= 0 && button_enabled(idx)) {
@@ -276,6 +294,7 @@ LRESULT activity_window::OnLButtonDblClk(UINT, WPARAM, LPARAM lp, BOOL& handled)
 }
 
 LRESULT activity_window::OnLButtonUp(UINT, WPARAM, LPARAM lp, BOOL& handled) {
+    if (m_similar_sb_dragging) { m_similar_sb_dragging = false; ReleaseCapture(); Invalidate(FALSE); return 0; }
     if (m_sb_dragging) { scrollbar_mouse_up(); return 0; }
     if (m_down < 0) { handled = FALSE; return 0; }
     const int down = m_down;
@@ -392,7 +411,7 @@ void activity_window::paint(HDC dc, const RECT& rc) {
     const auto st = mbdb_activity::stats();
     const int x = pad, right = rc.right - pad;
     int y = pad;
-    for (int i = 2; i < 6; ++i) m_btn[i] = RECT(); // only the artists / now playing tabs have these buttons
+    for (int i = 2; i < 8; ++i) m_btn[i] = RECT(); // only the artists / now playing tabs have these buttons
     m_sb_track = RECT(); // set again by draw_scrollbar() when the list is long enough to scroll
     m_sb_thumb = RECT();
 

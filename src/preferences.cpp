@@ -3,6 +3,7 @@
 #include <mutex>
 #include "preferences.h"
 #include "resource.h"
+#include "../include/listenbrainz_similar_artists.h"
 
 namespace {
 
@@ -15,6 +16,7 @@ const GUID guid_cfg_title_field  = { 0x6a400bd4, 0x3dee, 0x4c4b, { 0xb3, 0xff, 0
 
 const GUID guid_cfg_dynamic_delay = { 0x2b0529ae, 0xc9a6, 0x447e, { 0x99, 0xe7, 0x97, 0xa2, 0x6e, 0x3d, 0xd8, 0x2b } };
 const GUID guid_cfg_rate_limit    = { 0x5d1c7a3e, 0x2f84, 0x4b19, { 0xa6, 0x0e, 0x91, 0x3c, 0xd4, 0x7b, 0x28, 0xf5 } };
+const GUID guid_cfg_lb_algorithm  = { 0x9c90a8b1, 0x5e16, 0x48f4, { 0x9b, 0x62, 0x32, 0x17, 0x84, 0x29, 0xa1, 0x0c } };
 
 constexpr unsigned k_max_dynamic_delay = 300; // seconds
 
@@ -29,6 +31,7 @@ cfg_string g_cfg_artist(guid_cfg_artist_field, "");
 cfg_string g_cfg_title(guid_cfg_title_field, "");
 cfg_int    g_cfg_dynamic_delay(guid_cfg_dynamic_delay, 0);
 cfg_int    g_cfg_rate_limit(guid_cfg_rate_limit, k_default_rate_limit);
+cfg_string g_cfg_lb_algorithm(guid_cfg_lb_algorithm, "session_based_days_1800_session_300_contribution_3_threshold_10_limit_100_filter_True_skip_30");
 
 // cfg_string is a plain pfc::string8; guard it because lookups read it from
 // worker threads while the page may be writing it on the UI thread.
@@ -62,6 +65,7 @@ public:
             g_cfg_title.set_string(read_edit(IDC_TITLE_FIELD).get_ptr());
             g_cfg_dynamic_delay = static_cast<t_int32>(read_delay());
             g_cfg_rate_limit = static_cast<t_int32>(read_rate_limit());
+            g_cfg_lb_algorithm.set_string(read_edit(IDC_LB_ALGORITHM).get_ptr());
         }
         SetDlgItemInt(IDC_RATE_LIMIT, read_rate_limit(), FALSE); // shows the clamped value
         m_callback->on_state_changed();
@@ -73,6 +77,7 @@ public:
         uSetDlgItemText(*this, IDC_TITLE_FIELD, "");
         SetDlgItemInt(IDC_DYNAMIC_DELAY, 0, FALSE);
         SetDlgItemInt(IDC_RATE_LIMIT, k_default_rate_limit, FALSE);
+        uSetDlgItemText(*this, IDC_LB_ALGORITHM, "session_based_days_1800_session_300_contribution_3_threshold_10_limit_100_filter_True_skip_30");
         update_status();
         m_callback->on_state_changed();
     }
@@ -84,6 +89,9 @@ public:
         COMMAND_HANDLER_EX(IDC_TITLE_FIELD, EN_CHANGE, OnEdited)
         COMMAND_HANDLER_EX(IDC_DYNAMIC_DELAY, EN_CHANGE, OnEdited)
         COMMAND_HANDLER_EX(IDC_RATE_LIMIT, EN_CHANGE, OnEdited)
+        COMMAND_HANDLER_EX(IDC_LB_ALGORITHM, CBN_EDITCHANGE, OnEdited)
+        COMMAND_HANDLER_EX(IDC_LB_ALGORITHM, CBN_SELCHANGE, OnEdited)
+        COMMAND_HANDLER_EX(IDC_LB_LOAD_ALGORITHMS, BN_CLICKED, OnLoadAlgorithms)
     END_MSG_MAP()
 
 private:
@@ -99,6 +107,7 @@ private:
             uSetDlgItemText(*this, IDC_TITLE_FIELD, g_cfg_title.get_ptr());
             SetDlgItemInt(IDC_DYNAMIC_DELAY, static_cast<UINT>(g_cfg_dynamic_delay.get_value()), FALSE);
             SetDlgItemInt(IDC_RATE_LIMIT, mbdb_prefs::rate_limit_seconds(), FALSE);
+            uSetDlgItemText(*this, IDC_LB_ALGORITHM, g_cfg_lb_algorithm.get_ptr());
         }
         ::SendMessage(GetDlgItem(IDC_ARTIST_FIELD), EM_SETCUEBANNER, FALSE, (LPARAM)L"%artist% (default)");
         ::SendMessage(GetDlgItem(IDC_TITLE_FIELD), EM_SETCUEBANNER, FALSE, (LPARAM)L"%title% (default)");
@@ -106,6 +115,28 @@ private:
         ::SendMessage(GetDlgItem(IDC_RATE_LIMIT), EM_SETLIMITTEXT, 2, 0);
         update_status();
         return FALSE;
+    }
+
+    void OnLoadAlgorithms(UINT, int, CWindow) {
+        ::SetDlgItemTextW(m_hWnd, IDC_LB_ALGORITHM_STATUS, L"Loading choices from ListenBrainz Labs...");
+        ::UpdateWindow(GetDlgItem(IDC_LB_ALGORITHM_STATUS));
+        std::vector<std::string> algorithms;
+        std::string error;
+        if (!listenbrainz_fetch_available_algorithms(algorithms, &error)) {
+            uSetDlgItemText(*this, IDC_LB_ALGORITHM_STATUS, error.c_str());
+            return;
+        }
+        HWND combo = GetDlgItem(IDC_LB_ALGORITHM);
+        const pfc::string8 current = read_edit(IDC_LB_ALGORITHM);
+        SendMessage(combo, CB_RESETCONTENT, 0, 0);
+        for (const auto& algorithm : algorithms) {
+            const std::wstring wide(algorithm.begin(), algorithm.end());
+            SendMessageW(combo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(wide.c_str()));
+        }
+        SetWindowTextA(combo, current.get_ptr());
+        uSetDlgItemText(*this, IDC_LB_ALGORITHM_STATUS,
+            (std::to_string(algorithms.size()) + " algorithm choice(s) loaded. Select one or keep typing a custom identifier.").c_str());
+        m_callback->on_state_changed();
     }
 
     void OnEdited(UINT, int, CWindow) {
@@ -139,6 +170,7 @@ private:
         return is_debug_checked() != g_cfg_debug_log.get_value()
             || strcmp(read_edit(IDC_ARTIST_FIELD).get_ptr(), g_cfg_artist.get_ptr()) != 0
             || strcmp(read_edit(IDC_TITLE_FIELD).get_ptr(), g_cfg_title.get_ptr()) != 0
+            || strcmp(read_edit(IDC_LB_ALGORITHM).get_ptr(), g_cfg_lb_algorithm.get_ptr()) != 0
             || read_delay() != static_cast<unsigned>(g_cfg_dynamic_delay.get_value())
             || read_rate_limit() != mbdb_prefs::rate_limit_seconds();
     }
@@ -197,6 +229,11 @@ std::string artist_pattern() {
 std::string title_pattern() {
     std::lock_guard<std::mutex> lock(g_cfg_mutex);
     return std::string(g_cfg_title.get_ptr());
+}
+
+std::string listenbrainz_similar_artists_algorithm() {
+    std::lock_guard<std::mutex> lock(g_cfg_mutex);
+    return std::string(g_cfg_lb_algorithm.get_ptr());
 }
 
 }

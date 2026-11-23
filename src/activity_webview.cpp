@@ -6,6 +6,7 @@
 #include <wrl.h>
 #include <wrl/event.h>
 
+#include <filesystem>
 #include <utility>
 
 using Microsoft::WRL::Callback;
@@ -27,6 +28,23 @@ struct activity_webview::state {
 };
 
 namespace {
+
+// WebView2 keeps its profile (cache, cookies, ...) in a "user data folder". When none is
+// given it creates "<exe name>.WebView2" next to foobar2000.exe, so use the component's
+// folder in the foobar2000 profile instead: <profile>\foo_musicbrainz_db\WebView2.
+// Returns an empty string when the folder cannot be prepared (WebView2 then uses its default).
+std::wstring user_data_folder() {
+    try {
+        pfc::string8 native_profile;
+        foobar2000_io::extract_native_path(core_api::get_profile_path(), native_profile);
+        const std::filesystem::path dir =
+            std::filesystem::u8path(native_profile.c_str()) / "foo_musicbrainz_db" / "WebView2";
+        std::filesystem::create_directories(dir);
+        return dir.wstring();
+    } catch (...) {
+        return std::wstring();
+    }
+}
 
 bool is_http_url(const std::wstring& url) {
     return url.compare(0, 7, L"http://") == 0 ||
@@ -64,9 +82,11 @@ bool activity_webview::create(HWND parent) {
 
     const std::weak_ptr<state> weak = s;
 
+    const std::wstring data_folder = user_data_folder();
+
     HRESULT hr = CreateCoreWebView2EnvironmentWithOptions(
         nullptr,
-        nullptr,
+        data_folder.empty() ? nullptr : data_folder.c_str(),
         nullptr,
         Callback<
             ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler

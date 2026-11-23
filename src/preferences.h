@@ -22,3 +22,8 @@ unsigned dynamic_delay_seconds();
 unsigned rate_limit_seconds();
 
 }
+
+// ListenBrainz Labs Similar Artists algorithm identifier.
+namespace mbdb_prefs {
+std::string listenbrainz_similar_artists_algorithm();
+}

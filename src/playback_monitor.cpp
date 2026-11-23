@@ -536,6 +536,31 @@ size_t mbdb_search_tracks(metadb_handle_list_cref items) {
     return queued;
 }
 
+size_t mbdb_search_artist_mbids(const std::vector<std::string>& mbids) {
+    std::set<std::string> seen;
+    std::vector<track_query> jobs;
+    size_t invalid = 0;
+    for (const auto& raw : mbids) {
+        std::string id = trim(raw);
+        if (!is_mbid(id)) { ++invalid; continue; }
+        for (auto& c : id) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        if (!seen.insert(id).second) continue;
+        track_query q;
+        q.artist_mbid = id;
+        q.batch = true;
+        jobs.push_back(std::move(q));
+    }
+    const size_t queued = jobs.size();
+    mbdb_activity::batch_add(queued);
+    for (const auto& q : jobs) {
+        if (!queue_lookup("similar artists", q, false)) mbdb_activity::batch_drop(1);
+    }
+    char msg[200];
+    snprintf(msg, sizeof(msg), "Download similar artists: %zu lookup(s) queued, %zu without a valid MBID", queued, invalid);
+    mbdb_activity::add_event(queued ? mbdb_activity::lvl_info : mbdb_activity::lvl_warn, msg);
+    return queued;
+}
+
 void mbdb_reload_now_playing() {
     const auto np = mbdb_activity::now_playing();
     if (np.state == mbdb_activity::np_found) {

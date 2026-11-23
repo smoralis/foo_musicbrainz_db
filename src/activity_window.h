@@ -7,6 +7,7 @@
 #include <vector>
 #include "../include/musicbrainz_db_types.h"
 #include "activity_webview.h"
+#include "listenbrainz_similar_artists.h"
 
 // Result of a background "list artists" request, polled by the window's timer.
 struct activity_reload_state {
@@ -23,6 +24,17 @@ struct activity_np_fetch {
     bool ok = false;
     artist_record record;
     std::shared_ptr<const mbdb_info_content> content; // built on the background thread
+};
+
+// Result of a ListenBrainz request; the worker only writes under the mutex and
+// the window timer installs the result on the UI thread.
+struct activity_similar_artists_state {
+    std::mutex m;
+    bool ready = false;
+    bool ok = false;
+    std::string artist_mbid;
+    std::string error;
+    std::vector<listenbrainz_similar_artist> artists;
 };
 
 // What the panel needs from its host (DUI element or CUI panel).
@@ -138,6 +150,12 @@ private:
     void artists_context_menu(POINT screen_pt);
     void reload_artists();   // asks the background thread for a fresh list
     bool poll_reload();      // installs a finished list; true if anything changed
+    void request_similar_artists();
+    std::vector<std::string> similar_missing_mbids() const; // similar artists not yet in the database
+    void download_similar_artists();
+    void download_similar_of_selected();
+    bool poll_similar_artists();
+    void paint_similar_artists(HDC dc, const RECT& pane, int line_h, int gap, int dpi);
     void create_search();
     void position_search(const RECT& inner);
     void rebuild_haystack();
@@ -164,7 +182,9 @@ private:
     // Toolbar buttons drawn on the title row: 0 = Search selected, 1 = Cancel queued.
     // Toolbar buttons: 0 = Search selected, 1 = Cancel queued (title row);
     // 2 = Delete selected, 3 = Export JSON, 4 = Refresh (artists tab only).
-    RECT m_btn[6] = {};
+    // 6 = Download similar artists (similar pane of the artists tab).
+    // 7 = Download similar artists of the selected rows (artists toolbar).
+    RECT m_btn[8] = {};
     int m_hot = -1, m_down = -1;
     RECT m_sb_track = {}, m_sb_thumb = {};   // empty when the list fits
     size_t m_sb_total = 0, m_sb_visible = 0;
@@ -204,7 +224,17 @@ private:
     int m_sort_col = 0;                     // 0 name, 1 country, 2 mbid
     bool m_sort_asc = true;
     long long m_focus = -1, m_anchor = -1;  // display positions
-    RECT m_tab[3] = {}, m_header_rc = {}, m_list_rc = {};
+    RECT m_tab[3] = {}, m_header_rc = {}, m_list_rc = {}, m_similar_rc = {};
+    std::shared_ptr<activity_similar_artists_state> m_similar_fetch;
+    std::string m_similar_requested_mbid, m_similar_error;
+    std::vector<listenbrainz_similar_artist> m_similar_rows;
+    bool m_similar_loading = false;
+    int m_similar_row_top = 0, m_similar_row_height = 0;
+    size_t m_similar_scroll = 0, m_similar_visible_rows = 0, m_similar_max_scroll = 0;
+    long long m_similar_selected = -1;
+    RECT m_similar_sb_track = {}, m_similar_sb_thumb = {};
+    int m_similar_sb_grab = 0;
+    bool m_similar_sb_dragging = false;
     int m_col_x[4] = {};
     int m_row_h = 0;
     bool m_batch_was_visible = false; // so the timer repaints once more when the bar hides

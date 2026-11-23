@@ -1,6 +1,57 @@
 #include "provider.h"
 #include "debug_log.h"
 #include "activity.h"
+#include "bg_tasks.h"
+#include "listenbrainz_similar_artists.h"
+#include "preferences.h"
+#include <mutex>
+#include <set>
+#include <vector>
+
+namespace {
+// Avoid queuing the same artist/algorithm more than once while a prefetch is pending.
+std::mutex g_similar_prefetch_mutex;
+std::set<std::string> g_similar_prefetch_pending;
+
+void queue_similar_artists_prefetch(const std::string& mbid) {
+    if (mbid.empty()) return;
+
+    const std::string algorithm = mbdb_prefs::listenbrainz_similar_artists_algorithm();
+    const std::string key = mbid + "|" + algorithm;
+    {
+        std::lock_guard<std::mutex> lock(g_similar_prefetch_mutex);
+        if (!g_similar_prefetch_pending.insert(key).second) return;
+    }
+
+    MBDB_LOG("ListenBrainz: queued Similar Artists prefetch for %s", mbid.c_str());
+    mbdb_run_async([mbid, algorithm, key] {
+        std::vector<listenbrainz_similar_artist> results;
+        std::string error;
+        listenbrainz_similar_artists client;
+        const bool ok = client.fetch(mbid, algorithm, results, &error);
+
+        {
+            std::lock_guard<std::mutex> lock(g_similar_prefetch_mutex);
+            g_similar_prefetch_pending.erase(key);
+        }
+
+        if (ok) {
+            MBDB_LOG("ListenBrainz: prefetched %zu similar artists for %s",
+                results.size(), mbid.c_str());
+            mbdb_activity::add_event(mbdb_activity::lvl_good,
+                ("ListenBrainz: cached " + std::to_string(results.size()) +
+                 " similar artists for " + mbid).c_str());
+        }
+        else {
+            MBDB_LOG("ListenBrainz: Similar Artists prefetch failed for %s: %s",
+                mbid.c_str(), error.c_str());
+            mbdb_activity::add_event(mbdb_activity::lvl_warn,
+                ("ListenBrainz Similar Artists unavailable for " + mbid +
+                 (error.empty() ? std::string() : ": " + error)).c_str());
+        }
+    });
+}
+} // namespace
 
 bool musicbrainz_db_provider::initialize(const std::string& db,
         const std::string& repo) {
@@ -30,6 +81,10 @@ bool musicbrainz_db_provider::load_artist(const std::string& mbid,artist_record&
         MBDB_LOG("artist fetch/save FAILED (%s)", mbid.c_str());
         return false;
     }
+    // The artist is now a new complete database entry. Prefetch ListenBrainz
+    // Similar Artists on the separate panel background worker so the MusicBrainz
+    // lookup queue and UI are not blocked by the Labs request.
+    queue_similar_artists_prefetch(mbid);
     mbdb_activity::set_db_artists(m_database.count_artists());
     if(m_exporter) {
         mbdb_activity::set_step("writing JSON files");

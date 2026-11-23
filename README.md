@@ -43,6 +43,7 @@ The window follows the host's light/dark colours and font where available. It ha
 
 - **Activity:** shows current lookup/task status, database artist count and size, lookup success/failure totals, queued lookups, cache hits/misses and hit rate, HTTP request/failure/throttling counts, last HTTP status and average request duration. It also shows the event feed. Events can be copied or cleared from its context menu.
 - **Artists:** browses the artists currently cached in SQLite. The list shows artist name, country and type; clicking a column header sorts by that column. A search box filters by artist name, country or MBID.
+- **Similar artists (Artists tab, right pane):** the right-hand part of the Artists tab shows artists similar to the focused artist, taken from the public ListenBrainz Labs *Similar Artists* service and listed with their similarity score (scrollable; click a row to select it, double-click to open its artist information window). It follows the focused row of the table. A **Download similar (N)** button at the top of the pane queues every listed artist that is not yet in the database; N is the number still missing. When nothing is missing the button reads **All similar artists stored** and is disabled.
 - **Now playing:** shows the stored MusicBrainz record of the playing track's artist, with the same sections and links as the artist info window. The content area is split into two panes: artist information occupies **30% of the width on the left**, while an embedded **WebView2 browser occupies 70% on the right**. The first row reads **Now Playing : artist**; the second row holds the **Show raw JSON** button. It follows track changes and stream metadata updates, and shows what it is doing while the lookup runs (or that nothing is playing or nothing was found). Clicking supported HTTP/HTTPS links or MusicBrainz artist IDs in the artist information pane navigates to the corresponding page inside the embedded browser. When playback stops the view is blank and the first row reads **Now Playing : Stopped**. The view is also cleared when playback stops and when stream metadata changes (while a configured delay is running it shows that it is waiting); a stream that returns to the same song after a jingle is looked up again. When a **Search selected** run finishes with at least one success, the view reloads, so a playing artist that was just stored shows up without waiting for the next track.
 
 The Artists tab supports standard multi-selection (Ctrl-click and Shift-click), keyboard navigation, and these actions:
@@ -53,6 +54,7 @@ The Artists tab supports standard multi-selection (Ctrl-click and Shift-click), 
 - **Export selected/all list.** Saves a JSON array with each artist's `mbid`, `name`, `country` and `type`.
 - **Copy MBID(s)** (Ctrl+C).
 - **Select all** (Ctrl+A), **Refresh** (F5), and **Clear selection** (Escape).
+- **Download similar** (Artists toolbar, next to **Refresh**). Fetches the ListenBrainz similar artists of every selected artist, merges them, and queues a lookup by MusicBrainz ID for each one not yet in the database. It is enabled when at least one artist is selected (Ctrl-click, Shift-click or Ctrl+A to select several). The ListenBrainz requests run on the background task thread, so the Activity view shows *Fetching similar artists of N artist(s)...* while they work; the Activity feed then reports how many new artists were found and how many requests failed. Both **Download similar** buttons use the same lookup queue as **Search selected**: lookups are rate limited, show the same batch progress bar, can be stopped with **Cancel queued**, and the Artists table refreshes as artists arrive. Artists that are already stored finish without a network request.
 - **Search selected** queues a lookup for each distinct artist in the current foobar2000 selection (or the active playlist selection when there is no UI selection). The panel displays batch progress, completed/failed counts, elapsed time and an estimated remaining time while work is in progress.
 - **Cancel queued** removes pending lookups from the queue. It does not interrupt an HTTP request already in progress.
 
@@ -66,7 +68,10 @@ Everything is stored in your foobar2000 profile folder:
 <profile>\foo_musicbrainz_db\
 ├── database\
 │   └── musicbrainz.sqlite3
+├── WebView2\                       browser profile of the Now playing view
 └── repository\
+    ├── listenbrainz\
+    │   └── <mbid>_<hash>.json       cached similar-artists results (7 days)
     └── artists\
         ├── artists_all.json         complete MusicBrainz artist response
         ├── artists_basic.json       name, sort-name, type, gender, disambiguation,
@@ -77,7 +82,10 @@ Everything is stored in your foobar2000 profile folder:
         └── artists_tags.json        name and tags
 ```
 
-Each repository file is a single JSON object keyed by artist MBID. Every record includes its `mbid`. The split files contain only the fields named above; fields absent from the MusicBrainz response are omitted, while the genres, relations and tags arrays are always present (empty when the artist has none).
+The `WebView2` folder is the embedded browser's user data folder (cache, cookies, local storage). It is created in the profile instead of next to `foobar2000.exe`; it can be deleted while foobar2000 is closed. If the folder cannot be created, WebView2 falls back to its default location next to the executable.																						  
+The `listenbrainz` folder holds one small cache file per artist and algorithm; entries older than seven days are fetched again. It can be deleted at any time.
+
+Each file in `repository\artists\` is a single JSON object keyed by artist MBID. Every record includes its `mbid`. The split files contain only the fields named above; fields absent from the MusicBrainz response are omitted, while the genres, relations and tags arrays are always present (empty when the artist has none).
 
 The repository is maintained as artists are first fetched and when artists are deleted through the Artists tab. The SQLite database is the source used for artist browsing and exports.
 
@@ -103,9 +111,12 @@ Open **Preferences > Tools > MusicBrainz DB**.
 | Artist field | Optional foobar2000 title-formatting pattern used instead of the plain artist metadata field. Empty means use the tag. |
 | Title field | Optional title-formatting pattern used instead of the plain title metadata field. Empty means use the tag. |
 | Dynamic info delay (seconds) | Waits 0–300 seconds after stream metadata changes before queuing a lookup. Every newer update restarts the wait; `0` looks up immediately. |
-| Rate limit (seconds) | Minimum delay between MusicBrainz requests. Default 2 seconds. The HTTP client enforces a safety minimum of 1.1 seconds even if a lower value reaches it. |
+| ListenBrainz similar artists algorithm | Algorithm identifier sent to ListenBrainz Labs. An editable drop-down: **Load choices** fetches the currently published algorithms, or type a custom identifier. The default is `session_based_days_1800_session_300_contribution_3_threshold_10_limit_100_filter_True_skip_30`. |
+| Rate limit (seconds) | Minimum delay between MusicBrainz requests, 1–60 seconds (values outside the range are clamped). Default 2 seconds. The HTTP client enforces a safety minimum of 1.1 seconds even if a lower value reaches it. |
 
 For streams that send a combined "Artist - Title" title, the title is split first and the custom patterns are evaluated against the split artist and title. For in-stream metadata updates, the file's own artist, title and MusicBrainz artist ID tags are ignored; its other tags (for example album artist) stay available to the patterns.
+
+The page's standard **Reset** button restores every setting above to its default, including the ListenBrainz algorithm. The ListenBrainz algorithm setting only affects the similar-artists features; the MusicBrainz rate limit does not apply to ListenBrainz requests.
 
 Invalid or empty custom patterns fall back to the corresponding plain metadata tag. The preferences page reports invalid patterns. Status messages (initialization, matches and errors) are printed to the console regardless of the debug-logging setting.
 
@@ -125,9 +136,9 @@ Requirements:
 
 - Visual Studio 2022 (toolset v143), C++17
 - foobar2000 SDK, with this project placed in the SDK's `foobar2000` folder as `foo_musicbrainz_db`
-- SQLite3 and nlohmann/json (for example via vcpkg)
+- SQLite3 and nlohmann/json (for example via vcpkg); the project links `sqlite3.lib` and `winhttp.lib`
 - WTL (restored through NuGet; the project expects `packages\wtl.10.1.0`)
-- **Microsoft WebView2 SDK/runtime** (NuGet package `Microsoft.Web.WebView2`; the project uses the WebView2 native headers and loader)																																												  
+- **Microsoft WebView2 SDK/runtime** (NuGet package `Microsoft.Web.WebView2`, version 1.0.4314.35 in `packages.config`; the project uses the WebView2 native headers and loader)																																												  
 - The SDK's `shared-x64.lib` / `shared-Win32.lib`
 - Columns UI SDK headers/library for the Columns UI panel integration
 
@@ -167,6 +178,8 @@ Please treat the database as read-only and do not write to it. The schema versio
 
 `include/musicbrainz_db_interface.h` describes a lookup contract (`search_artist_title`, `get_artist_country`, `get_artist_json`). The provider implements this interface internally, but the header explicitly describes it as a conceptual contract: it is not registered as a foobar2000 service and cannot currently be called across components.
 
+`include/listenbrainz_similar_artists.h` is the public ListenBrainz provider header (`listenbrainz_similar_artist`, `listenbrainz_similar_artists::fetch()`, `default_algorithm()` and `listenbrainz_fetch_available_algorithms()`). `src/listenbrainz_similar_artists.h` only forwards to it, so there is a single set of declarations.
+
 `include/musicbrainz_db_types.h` defines the lightweight artist-list row (`mbid`, `name`, `country`, `type`) and artist record, including the full raw JSON response.
 
 
@@ -178,7 +191,8 @@ Musicbrainz_db webview https://hydrogenaudio.org/index.php/topic,126243.msg10902
 
 ## Privacy and network use
 
-The component sends artist names, track titles and/or MusicBrainz artist IDs from the tracks you play to `musicbrainz.org` over HTTPS to identify artists and retrieve artist records. The component stores artist records locally in the profile folder. It does not upload the local database or JSON repository. Nothing else is collected by the author.
+The component sends artist names, track titles and/or MusicBrainz artist IDs from the tracks you play to `musicbrainz.org` over HTTPS to identify artists and retrieve artist records. The component stores artist records locally in the profile folder. It does not upload the local database or JSON repository. When similar artists are shown or downloaded, the MusicBrainz artist IDs involved (and the selected algorithm name) are also sent to `labs.api.listenbrainz.org` over HTTPS; no ListenBrainz user token is sent. Similar-artist results are cached under `repository\listenbrainz\` for seven days. Nothing else is collected by the author.
+
 
 ## Credits
 

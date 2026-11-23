@@ -6,11 +6,15 @@
 #include "activity_util.h"
 #include "artist_table.h"
 #include "bg_tasks.h"
+#include "lookup_queue.h"
+#include "listenbrainz_similar_artists.h"
+#include "preferences.h"
 #include <windowsx.h>
 #include <commdlg.h>
 #include <algorithm>
 #include <cctype>
 #include <set>
+#include <unordered_set>
 
 using namespace actutil;
 
@@ -78,6 +82,7 @@ void activity_window::sort_artists() {
         return ci_less(x.mbid, y.mbid); // stable tie-break
     });
     m_focus = m_anchor = -1;
+    request_similar_artists();
     if (m_ascroll > m_order.size()) m_ascroll = 0;
 }
 
@@ -135,6 +140,232 @@ void activity_window::ensure_visible(long long pos) {
     else if (p >= m_ascroll + m_visible_rows) m_ascroll = p - m_visible_rows + 1;
 }
 
+// ------------------------------------------------ ListenBrainz Similar Artists ---
+
+void activity_window::request_similar_artists() {
+    if (m_focus < 0 || static_cast<size_t>(m_focus) >= m_order.size()) {
+        m_similar_requested_mbid.clear();
+        m_similar_rows.clear();
+        m_similar_error.clear();
+        m_similar_loading = false;
+        m_similar_fetch.reset();
+        return;
+    }
+    const size_t row_id = m_order[static_cast<size_t>(m_focus)];
+    if (row_id >= m_rows.size()) return;
+    const std::string mbid = m_rows[row_id].mbid;
+    if (mbid.empty() || mbid == m_similar_requested_mbid) return;
+
+    m_similar_requested_mbid = mbid;
+    m_similar_rows.clear();
+    m_similar_error.clear();
+    m_similar_scroll = 0;
+    m_similar_selected = -1;
+    m_similar_loading = true;
+    auto state = std::make_shared<activity_similar_artists_state>();
+    state->artist_mbid = mbid;
+    m_similar_fetch = state;
+    const std::string algorithm = mbdb_prefs::listenbrainz_similar_artists_algorithm();
+    mbdb_run_async([state, mbid, algorithm] {
+        listenbrainz_similar_artists provider;
+        std::vector<listenbrainz_similar_artist> results;
+        std::string error;
+        const bool ok = provider.fetch(mbid, algorithm, results, &error);
+        std::lock_guard<std::mutex> lock(state->m);
+        state->ok = ok;
+        state->artists = std::move(results);
+        state->error = std::move(error);
+        state->ready = true;
+    });
+}
+
+std::vector<std::string> activity_window::similar_missing_mbids() const {
+    std::vector<std::string> out;
+    if (m_similar_rows.empty()) return out;
+    auto lower = [](std::string s) {
+        for (auto& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        return s;
+    };
+    std::unordered_set<std::string> stored;
+    stored.reserve(m_rows.size());
+    for (const auto& r : m_rows) stored.insert(lower(r.mbid));
+    std::unordered_set<std::string> seen;
+    for (const auto& a : m_similar_rows) {
+        if (a.mbid.empty()) continue;
+        const std::string id = lower(a.mbid);
+        if (stored.count(id) || !seen.insert(id).second) continue;
+        out.push_back(a.mbid);
+    }
+    return out;
+}
+
+// Queues every similar artist that is not stored yet; the lookup queue fetches them one
+// at a time, obeying the MusicBrainz rate limit, and the table reloads as they arrive.
+void activity_window::download_similar_artists() {
+    const auto mbids = similar_missing_mbids();
+    if (mbids.empty()) return;
+    mbdb_search_artist_mbids(mbids);
+    Invalidate(FALSE);
+}
+
+// For every selected artist: fetch its ListenBrainz similar artists (on the background
+// thread), then queue the ones that are not stored yet for download.
+void activity_window::download_similar_of_selected() {
+    const auto mbids = selected_mbids();
+    if (mbids.empty()) return;
+    const std::string algorithm = mbdb_prefs::listenbrainz_similar_artists_algorithm();
+    mbdb_run_async([mbids, algorithm] {
+        mbdb_activity::task_scope scope(("Fetching similar artists of " + std::to_string(mbids.size()) + " artist(s)...").c_str());
+        auto lower = [](std::string s) {
+            for (auto& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            return s;
+        };
+        std::unordered_set<std::string> known; // stored artists, plus ones already collected
+        std::vector<artist_list_item> stored;
+        mbdb_artist_list(stored);
+        for (const auto& r : stored) known.insert(lower(r.mbid));
+
+        listenbrainz_similar_artists provider;
+        std::vector<std::string> wanted;
+        size_t failed = 0;
+        for (const auto& mbid : mbids) {
+            std::vector<listenbrainz_similar_artist> results;
+            std::string error;
+            if (!provider.fetch(mbid, algorithm, results, &error)) { ++failed; continue; }
+            for (const auto& a : results) {
+                if (a.mbid.empty()) continue;
+                if (known.insert(lower(a.mbid)).second) wanted.push_back(a.mbid);
+            }
+        }
+        char text[200];
+        snprintf(text, sizeof(text), "Similar artists of %zu artist(s): %zu new, %zu request(s) failed",
+            mbids.size(), wanted.size(), failed);
+        mbdb_activity::add_event(failed ? mbdb_activity::lvl_warn : mbdb_activity::lvl_info, text);
+        if (!wanted.empty()) mbdb_search_artist_mbids(wanted);
+    });
+}
+
+bool activity_window::poll_similar_artists() {
+    if (!m_similar_fetch) return false;
+    std::vector<listenbrainz_similar_artist> results;
+    std::string error, mbid;
+    bool ok = false;
+    {
+        std::lock_guard<std::mutex> lock(m_similar_fetch->m);
+        if (!m_similar_fetch->ready) return false;
+        results = std::move(m_similar_fetch->artists);
+        error = std::move(m_similar_fetch->error);
+        mbid = m_similar_fetch->artist_mbid;
+        ok = m_similar_fetch->ok;
+    }
+    m_similar_fetch.reset();
+    // Ignore a late response if the user selected a different artist meanwhile.
+    if (mbid != m_similar_requested_mbid) return false;
+    m_similar_loading = false;
+    m_similar_rows = std::move(results);
+    m_similar_error = ok ? std::string() : (error.empty() ? "ListenBrainz request failed" : error);
+    return true;
+}
+
+void activity_window::paint_similar_artists(HDC dc, const RECT& pane, int line_h, int gap, int dpi) {
+    m_similar_row_top = 0;
+    m_similar_row_height = 0;
+    m_similar_visible_rows = 0;
+    m_similar_max_scroll = 0;
+    m_similar_sb_track = RECT();
+    m_similar_sb_thumb = RECT();
+    m_btn[6] = RECT();
+    if (pane.right <= pane.left) return;
+
+    HPEN pen = CreatePen(PS_SOLID, 1, mix(m_fg, m_bg, 25));
+    HGDIOBJ old_pen = SelectObject(dc, pen);
+    MoveToEx(dc, pane.left, pane.top, nullptr);
+    LineTo(dc, pane.left, pane.bottom);
+    SelectObject(dc, old_pen);
+    DeleteObject(pen);
+
+    const int x = pane.left + gap;
+    const int right = pane.right - gap;
+    int y = pane.top + MulDiv(3, dpi, 96);
+    SelectObject(dc, m_bold ? m_bold : m_font);
+    draw_text(dc, x, y, right, line_h, L"Similar artists · ListenBrainz", m_accent);
+    SelectObject(dc, m_font);
+    y += line_h + MulDiv(5, dpi, 96);
+
+    if (!m_similar_requested_mbid.empty() && !m_similar_loading && m_similar_error.empty() && !m_similar_rows.empty()) {
+        const size_t missing = similar_missing_mbids().size();
+        const std::wstring label = missing > 0
+            ? L"Download similar (" + format_count(missing) + L")"
+            : std::wstring(L"All similar artists stored");
+        const int padx = MulDiv(10, dpi, 96);
+        const int w = (std::min)(text_width(dc, label) + 2 * padx, static_cast<int>((std::max)(0L, static_cast<LONG>(right - x))));
+        m_btn[6] = { x, y, x + w, y + line_h };
+        draw_button(dc, 6, label);
+        y += line_h + MulDiv(5, dpi, 96);
+    }
+
+    std::wstring status;
+    if (m_similar_requested_mbid.empty()) status = L"Select an artist to find similar artists.";
+    else if (m_similar_loading) status = L"Loading similar artists...";
+    else if (!m_similar_error.empty()) status = widen(m_similar_error);
+    else if (m_similar_rows.empty()) status = L"No similar artists were returned.";
+    if (!status.empty()) {
+        RECT r = { x, y, right, pane.bottom - gap };
+        DrawTextW(dc, status.c_str(), static_cast<int>(status.size()), &r,
+            DT_LEFT | DT_TOP | DT_WORDBREAK | DT_NOPREFIX);
+        return;
+    }
+
+    const int row_h = line_h + MulDiv(3, dpi, 96);
+    m_similar_row_top = y;
+    m_similar_row_height = row_h;
+    const int sbw = MulDiv(12, dpi, 96);
+    const int sbgap = MulDiv(2, dpi, 96);
+    const int track_left = (std::max)(x, right - sbw);
+    const int rows_right = m_similar_rows.size() > 0 ? track_left - sbgap : right;
+    const int avail = static_cast<int>((std::max)(0L, static_cast<LONG>(pane.bottom - gap - y)));
+    m_similar_visible_rows = static_cast<size_t>(avail / row_h);
+    m_similar_max_scroll = m_similar_rows.size() > m_similar_visible_rows
+        ? m_similar_rows.size() - m_similar_visible_rows : 0;
+    if (m_similar_scroll > m_similar_max_scroll) m_similar_scroll = m_similar_max_scroll;
+
+    const size_t count = (std::min)(m_similar_visible_rows, m_similar_rows.size() - (std::min)(m_similar_scroll, m_similar_rows.size()));
+    const int score_w = text_width(dc, L"0.000") + gap;
+    for (size_t i = 0; i < count; ++i) {
+        const size_t index = m_similar_scroll + i;
+        const auto& a = m_similar_rows[index];
+        const int ry = y + static_cast<int>(i) * row_h;
+        RECT row = { x, ry, rows_right, ry + row_h };
+        if (static_cast<long long>(index) == m_similar_selected) {
+            HBRUSH selected = CreateSolidBrush(mix(m_accent, m_bg, 35));
+            FillRect(dc, &row, selected);
+            DeleteObject(selected);
+        }
+        draw_text(dc, x + gap / 2, ry, rows_right - score_w, line_h, widen(a.name), m_fg);
+        wchar_t score[32] = {};
+        swprintf_s(score, L"%.3f", a.score);
+        draw_text(dc, rows_right - score_w, ry, rows_right, line_h, score, m_dim);
+    }
+
+    if (m_similar_max_scroll > 0 && m_similar_visible_rows > 0 && pane.bottom > y) {
+        const int track_h = pane.bottom - gap - y;
+        const int min_thumb = (std::min)(track_h, MulDiv(24, dpi, 96));
+        int thumb_h = static_cast<int>(static_cast<double>(track_h) * m_similar_visible_rows / m_similar_rows.size());
+        thumb_h = (std::min)(track_h, (std::max)(min_thumb, thumb_h));
+        const int travel = track_h - thumb_h;
+        const int thumb_top = y + static_cast<int>(static_cast<double>(travel) * m_similar_scroll / m_similar_max_scroll);
+        m_similar_sb_track = { track_left, y, right, pane.bottom - gap };
+        m_similar_sb_thumb = { track_left, thumb_top, right, thumb_top + thumb_h };
+        HBRUSH track = CreateSolidBrush(mix(m_fg, m_bg, 7));
+        FillRect(dc, &m_similar_sb_track, track);
+        DeleteObject(track);
+        RECT thumb = m_similar_sb_thumb;
+        InflateRect(&thumb, -MulDiv(2, dpi, 96), -1);
+        HBRUSH fill = CreateSolidBrush(mix(m_fg, m_bg, m_similar_sb_dragging ? 55 : 35));
+        FillRect(dc, &thumb, fill);
+        DeleteObject(fill);
+    }
+}
 // --------------------------------------------------------------- actions ---
 
 void activity_window::delete_selected() {
@@ -202,6 +433,7 @@ void activity_window::artists_context_menu(POINT screen_pt) {
                 std::fill(m_sel.begin(), m_sel.end(), 0);
                 m_sel[m_order[pos]] = 1;
                 m_focus = m_anchor = static_cast<long long>(pos);
+                request_similar_artists();
                 Invalidate(FALSE);
             }
         }
@@ -252,6 +484,29 @@ bool activity_window::tab_mouse_down(POINT pt) {
 bool activity_window::artists_mouse_down(POINT pt) {
     if (m_view != 1) return false;
     SetFocus();
+    if (PtInRect(&m_similar_rc, pt)) {
+        if (PtInRect(&m_similar_sb_track, pt)) {
+            if (PtInRect(&m_similar_sb_thumb, pt)) {
+                m_similar_sb_dragging = true;
+                m_similar_sb_grab = pt.y - m_similar_sb_thumb.top;
+                SetCapture();
+            } else {
+                const long long page = static_cast<long long>((std::max)(size_t(1), m_similar_visible_rows > 0 ? m_similar_visible_rows - 1 : 1));
+                const long long target = static_cast<long long>(m_similar_scroll) + (pt.y < m_similar_sb_thumb.top ? -page : page);
+                m_similar_scroll = static_cast<size_t>((std::max)(0LL, (std::min)(target, static_cast<long long>(m_similar_max_scroll))));
+            }
+            Invalidate(FALSE);
+            return true;
+        }
+        if (m_similar_row_height > 0 && pt.y >= m_similar_row_top) {
+            const size_t index = m_similar_scroll + static_cast<size_t>((pt.y - m_similar_row_top) / m_similar_row_height);
+            if (index < m_similar_rows.size()) m_similar_selected = static_cast<long long>(index);
+            else m_similar_selected = -1;
+            Invalidate(FALSE);
+            return true;
+        }
+        return true;
+    }
     if (PtInRect(&m_header_rc, pt)) {
         for (int c = 0; c < 3; ++c) {
             if (pt.x >= m_col_x[c] && pt.x < m_col_x[c + 1]) {
@@ -284,6 +539,7 @@ bool activity_window::artists_mouse_down(POINT pt) {
         } else if (!ctrl && !shift) {
             std::fill(m_sel.begin(), m_sel.end(), 0); // click below the last row
         }
+        request_similar_artists();
         Invalidate(FALSE);
         return true;
     }
@@ -291,7 +547,21 @@ bool activity_window::artists_mouse_down(POINT pt) {
 }
 
 bool activity_window::artists_dbl_click(POINT pt) {
-    if (m_view != 1 || m_row_h <= 0 || !PtInRect(&m_list_rc, pt)) return false;
+    if (m_view != 1) return false;
+    if (PtInRect(&m_similar_rc, pt) && m_similar_row_height > 0 && pt.y >= m_similar_row_top) {
+        const size_t index = m_similar_scroll + static_cast<size_t>((pt.y - m_similar_row_top) / m_similar_row_height);
+        if (index < m_similar_rows.size() && index < m_similar_scroll + m_similar_visible_rows) {
+            const auto& similar = m_similar_rows[index];
+            artist_list_item item;
+            item.mbid = similar.mbid;
+            item.name = similar.name;
+            item.type = similar.type;
+            mbdb_show_artist_info(item);
+            return true;
+        }
+        return false;
+    }
+    if (m_row_h <= 0 || !PtInRect(&m_list_rc, pt)) return false;
     const size_t pos = m_ascroll + static_cast<size_t>((pt.y - m_list_rc.top) / m_row_h);
     if (pos >= m_order.size()) return false;
     const size_t id = m_order[pos];
@@ -302,9 +572,18 @@ bool activity_window::artists_dbl_click(POINT pt) {
 }
 
 void activity_window::artists_wheel(int steps) {
-    long long target = static_cast<long long>(m_ascroll) - static_cast<long long>(steps) * 3;
-    target = (std::max)(0LL, (std::min)(target, static_cast<long long>(m_amax_scroll)));
-    m_ascroll = static_cast<size_t>(target);
+    POINT pt;
+    GetCursorPos(&pt);
+    ScreenToClient(&pt);
+    if (PtInRect(&m_similar_rc, pt)) {
+        long long target = static_cast<long long>(m_similar_scroll) - static_cast<long long>(steps) * 3;
+        target = (std::max)(0LL, (std::min)(target, static_cast<long long>(m_similar_max_scroll)));
+        m_similar_scroll = static_cast<size_t>(target);
+    } else {
+        long long target = static_cast<long long>(m_ascroll) - static_cast<long long>(steps) * 3;
+        target = (std::max)(0LL, (std::min)(target, static_cast<long long>(m_amax_scroll)));
+        m_ascroll = static_cast<size_t>(target);
+    }
     Invalidate(FALSE);
 }
 
@@ -325,6 +604,7 @@ LRESULT activity_window::OnKeyDown(UINT, WPARAM wp, LPARAM, BOOL& handled) {
         }
         m_focus = pos;
         ensure_visible(pos);
+        request_similar_artists();
         Invalidate(FALSE);
     };
     switch (wp) {
@@ -336,7 +616,7 @@ LRESULT activity_window::OnKeyDown(UINT, WPARAM wp, LPARAM, BOOL& handled) {
     case VK_HOME:   move_to(0); return 0;
     case VK_END:    move_to(n - 1); return 0;
     case VK_F5:     reload_artists(); return 0;
-    case VK_ESCAPE: std::fill(m_sel.begin(), m_sel.end(), 0); Invalidate(FALSE); return 0;
+    case VK_ESCAPE: std::fill(m_sel.begin(), m_sel.end(), 0); m_focus = -1; request_similar_artists(); Invalidate(FALSE); return 0;
     case 'A':
         if (ctrl) { select_range(0, n - 1, true); Invalidate(FALSE); return 0; }
         break;
@@ -423,6 +703,13 @@ void activity_window::paint_artists(HDC dc, const RECT& rc, int x, int right, in
             draw_button(dc, 2 + i, labels[i]);
             bx += w + gap / 2;
         }
+        {
+            const std::wstring label = L"Download similar";
+            const int w = text_width(dc, label) + 2 * padx;
+            m_btn[7] = { bx, y, bx + w, y + line_h };
+            draw_button(dc, 7, label);
+            bx += w + gap / 2;
+        }
         std::wstring info = format_count(selected_count()) + L" selected, ";
         info += m_filter.empty() ? format_count(m_rows.size()) + L" total"
                                  : format_count(m_order.size()) + L" of " + format_count(m_rows.size()) + L" shown";
@@ -452,18 +739,23 @@ void activity_window::paint_artists(HDC dc, const RECT& rc, int x, int right, in
     }
 
     // Reserve room for the scrollbar when the table is longer than the panel.
+    const int split_x = x + (right - x) * 56 / 100;
+    m_similar_rc = { split_x, y, right, rc.bottom - pad };
+    const int table_right = split_x - MulDiv(8, dpi, 96);
     const int sb_width = MulDiv(12, dpi, 96), sb_gap = MulDiv(2, dpi, 96);
     const int first_row_top = y + line_h; // the header row sits above the rows
     const int avail_rows = rc.bottom - pad - first_row_top;
     const size_t fit_rows = avail_rows > 0 ? static_cast<size_t>(avail_rows / line_h) : 0;
     const bool need_sb = m_order.size() > fit_rows;
-    const int cols_right = need_sb ? right - sb_width - sb_gap : right;
+    const int cols_right = need_sb ? table_right - sb_width - sb_gap : table_right;
 
     // Columns: Name | Country | MBID
-    const int mbid_w = text_width(dc, L"00000000-0000-0000-0000-000000000000") + gap;
-    const int country_w = text_width(dc, L"Country") + 2 * gap;
-    const int min_name = MulDiv(80, dpi, 96);
-    const int name_w = (std::max)(min_name, (cols_right - x) - mbid_w - country_w);
+    const int table_width = (std::max)(0, cols_right - x);
+    const int natural_mbid_w = text_width(dc, L"00000000-0000-0000-0000-000000000000") + gap;
+    const int natural_country_w = text_width(dc, L"Country") + 2 * gap;
+    const int mbid_w = (std::min)(natural_mbid_w, (std::max)(1, table_width / 3));
+    const int country_w = (std::min)(natural_country_w, (std::max)(1, table_width / 4));
+    const int name_w = (std::max)(1, table_width - mbid_w - country_w);
     m_col_x[0] = x;
     m_col_x[1] = x + name_w;
     m_col_x[2] = m_col_x[1] + country_w;
@@ -499,7 +791,8 @@ void activity_window::paint_artists(HDC dc, const RECT& rc, int x, int right, in
         const wchar_t* msg = !m_rows_loaded ? L"Loading artists..."
             : m_rows.empty() ? L"No artists in the database yet. Play or search some tracks to add artists."
             : L"No artists match the search.";
-        draw_text(dc, x + gap / 2, y, right, line_h, msg, m_dim);
+        draw_text(dc, x + gap / 2, y, table_right, line_h, msg, m_dim);
+        paint_similar_artists(dc, m_similar_rc, line_h, gap, dpi);
         return;
     }
     const bool focused = GetFocus() == m_hWnd;
@@ -521,7 +814,8 @@ void activity_window::paint_artists(HDC dc, const RECT& rc, int x, int right, in
         if (focused && static_cast<long long>(pos) == m_focus) DrawFocusRect(dc, &row);
     }
     if (need_sb)
-        draw_scrollbar(dc, right - sb_width, m_list_rc.top, m_list_rc.bottom, dpi, n, m_visible_rows, m_ascroll);
+        draw_scrollbar(dc, table_right - sb_width, m_list_rc.top, m_list_rc.bottom, dpi, n, m_visible_rows, m_ascroll);
+    paint_similar_artists(dc, m_similar_rc, line_h, gap, dpi);
 }
 
 // ---------------------------------------------------------- search box -----
