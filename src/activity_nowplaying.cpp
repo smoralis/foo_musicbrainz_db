@@ -6,6 +6,8 @@
 #include "artist_info_view.h"
 #include "artist_table.h"
 #include "bg_tasks.h"
+#include "preferences.h"
+#include <shellapi.h>
 #include <memory>
 #include <algorithm>
 
@@ -84,6 +86,26 @@ bool activity_window::poll_nowplaying() {
         changed = true;
     }
 
+    // Optionally open the playing artist's MusicBrainz page in the embedded browser. Only when
+    // the artist changes, so the page the user browsed to is not replaced by later updates
+    // for the same artist; a stop (or switching the option off) lets the artist load again.
+    if (!mbdb_prefs::auto_load_artist_page() || mbdb_prefs::embedded_browser_disabled() ||
+        m_np_state == mbdb_activity::np_idle) {
+        m_np_page_mbid.clear();
+        m_np_page_blank = false;
+    } else if (m_np_state == mbdb_activity::np_found && !m_np_mbid.empty() && m_np_mbid != m_np_page_mbid) {
+        m_np_page_mbid = m_np_mbid;
+        m_np_page_blank = false;
+        m_webview.navigate(L"https://musicbrainz.org/artist/" + widen(m_np_mbid));
+    } else if ((m_np_state == mbdb_activity::np_searching || m_np_state == mbdb_activity::np_not_found ||
+                m_np_state == mbdb_activity::np_stopped) && !m_np_page_blank) {
+        // While the artist is being looked up, when none was found, or when playback has
+        // stopped, do not leave the previous artist's page showing: show an empty page.
+        m_np_page_blank = true;
+        m_np_page_mbid.clear(); // so the same artist loads again once it is found
+        m_webview.navigate_blank();
+    }
+
     if (m_np_fetch) {
         bool ready = false, ok = false;
         artist_record record;
@@ -156,8 +178,15 @@ LRESULT activity_window::OnNotify(
 
         const std::wstring url = mbdb_info_get_link(hdr);
 
-        if (!url.empty())
-            m_webview.navigate(url);
+        if (!url.empty()) {
+            if (mbdb_prefs::embedded_browser_disabled()) {
+                // No embedded browser: hand web links to the default one.
+                if (url.rfind(L"http://", 0) == 0 || url.rfind(L"https://", 0) == 0)
+                    ::ShellExecuteW(nullptr, L"open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+            } else {
+                m_webview.navigate(url);
+            }
+        }
 
         return 0;
     }
@@ -170,6 +199,19 @@ void activity_window::paint_nowplaying(HDC dc, const RECT& rc, int x, int right,
                                        int gap, int pad, int dpi) {
     (void)gap;
     const int row_gap = MulDiv(4, dpi, 96);
+
+    // Two columns: the status, buttons and information text on the left, and the browser on
+    // the right using the full height of the tab (it starts at the top, level with the status).
+    const int top = y;
+    const int available_width = (std::max)(0, right - x);
+    const int np_gap = MulDiv(8, dpi, 96);
+    const bool use_browser = !mbdb_prefs::embedded_browser_disabled();
+    if (use_browser && !m_webview.exists())
+        m_webview.create(m_hWnd); // the option was switched off after the panel was created
+    // Without the embedded browser the information text uses the whole width.
+    const int split = use_browser ? available_width * 30 / 100 : available_width;
+    const int left_right = use_browser ? (std::max)(x, x + split - np_gap / 2) : right;
+    const int right_left = use_browser ? (std::min)(right, x + split + np_gap / 2) : right;
 
     // Row 1: Now Playing : <artist>
     std::wstring status;
@@ -185,7 +227,7 @@ void activity_window::paint_nowplaying(HDC dc, const RECT& rc, int x, int right,
         break;
     case mbdb_activity::np_not_found: status = widen(m_np_label); colour = m_warn; break;
     }
-    draw_text(dc, x, y, right, line_h, status, colour);
+    draw_text(dc, x, y, left_right, line_h, status, colour);
     y += line_h + row_gap;
 
     // Row 2: [Show raw JSON]
@@ -193,14 +235,19 @@ void activity_window::paint_nowplaying(HDC dc, const RECT& rc, int x, int right,
     const int bw = (std::max)(text_width(dc, L"Show raw JSON"), text_width(dc, L"Hide raw JSON")) + 2 * padx;
     m_btn[5] = { x, y, x + bw, y + line_h };
     draw_button(dc, 5, m_np_raw ? L"Hide raw JSON" : L"Show raw JSON");
+
+    // Toggle: open the playing artist's MusicBrainz page in the browser when the artist changes.
+    // On the same row when it fits, otherwise on the row below.
+    const std::wstring auto_on = L"Auto-open MusicBrainz page: On", auto_off = L"Auto-open MusicBrainz page: Off";
+    const int tw = (std::max)(text_width(dc, auto_on), text_width(dc, auto_off)) + 2 * padx;
+    m_btn[8] = RECT();
+    if (use_browser) {
+        int tx = x + bw + MulDiv(6, dpi, 96);
+        if (tx + tw > left_right) { y += line_h + row_gap; tx = x; }
+        m_btn[8] = { tx, y, (std::min)(static_cast<int>(left_right), tx + tw), y + line_h };
+        draw_button(dc, 8, mbdb_prefs::auto_load_artist_page() ? auto_on : auto_off);
+    }
     y += line_h + row_gap;
-
-const int available_width = (std::max)(0, right - x);
-const int np_gap = MulDiv(8, dpi, 96);
-const int split = available_width * 30 / 100;
-
-const int left_right = (std::max)(x, x + split - np_gap / 2);
-const int right_left = (std::min)(right, x + split + np_gap / 2);
 
 const RECT info = {
     x,
@@ -211,7 +258,7 @@ const RECT info = {
 
 const RECT webpage = {
     right_left,
-    y,
+    top,
     right,
     rc.bottom - pad
 };
@@ -236,7 +283,9 @@ else if (valid_info) {
     // but draw it using the left-hand "info" rectangle.
 }
 
-if (valid_webpage) {
+if (use_browser && valid_webpage) {
+    m_webview.set_dark(m_dark || mbdb_prefs::force_dark_browser());
+    m_webview.set_block_ads(mbdb_prefs::block_ads_in_browser());
     m_webview.set_bounds(webpage);
 
     const bool editing = m_host && m_host->is_edit_mode();

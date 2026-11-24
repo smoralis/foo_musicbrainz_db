@@ -2,6 +2,7 @@
 #include "activity.h"
 #include "ui_font.h"
 #include "lookup_queue.h"
+#include "preferences.h"
 #include <windowsx.h>
 #include <algorithm>
 #include <filesystem>
@@ -142,7 +143,8 @@ LRESULT activity_window::OnCreate(UINT, WPARAM, LPARAM, BOOL&) {
     update_theme();
     create_search();
     create_info();
-	m_webview.create(m_hWnd);
+    if (!mbdb_prefs::embedded_browser_disabled())
+        m_webview.create(m_hWnd); // otherwise created later if the option is switched off
     m_search.SetFont(m_font);
     m_db_size = db_file_size(mbdb_activity::stats().db_path);
     SetTimer(kTimerId, kTimerMs);
@@ -206,7 +208,7 @@ LRESULT activity_window::OnMouseWheel(UINT, WPARAM wp, LPARAM, BOOL&) {
 // ---------------------------------------------------------------- buttons --
 
 int activity_window::hit_test(POINT pt) const {
-    for (int i = 0; i < 8; ++i) if (PtInRect(&m_btn[i], pt)) return i;
+    for (int i = 0; i < 9; ++i) if (PtInRect(&m_btn[i], pt)) return i;
     return -1;
 }
 
@@ -215,6 +217,7 @@ bool activity_window::button_enabled(int index) const {
     case 1: return mbdb_activity::stats().queued > 0; // "Cancel" needs something queued
     case 2: return m_view == 1 && selected_count() > 0;
     case 3: return m_view == 1 && !m_rows.empty();
+    case 8: return m_view == 2 && !mbdb_prefs::embedded_browser_disabled();
     case 7: return m_view == 1 && selected_count() > 0;
     case 6: return m_view == 1 && !m_similar_loading && !similar_missing_mbids().empty();
     case 5: return m_view == 2 && m_np_has_record && m_np_content && mbdb_info_has_raw(*m_np_content);
@@ -230,6 +233,7 @@ void activity_window::activate_button(int index) {
     else if (index == 4) reload_artists();
     else if (index == 6) download_similar_artists();
     else if (index == 7) download_similar_of_selected();
+    else if (index == 8) { mbdb_prefs::set_auto_load_artist_page(!mbdb_prefs::auto_load_artist_page()); m_np_dirty = true; }
     else if (index == 5) { m_np_raw = !m_np_raw; m_np_dirty = true; Invalidate(FALSE); }
 }
 
@@ -351,14 +355,24 @@ void activity_window::on_edit_mode_changed() {
     }
 	
     const bool editing = m_host && m_host->is_edit_mode();
-	m_webview.show(!editing && m_view == 2);
+	m_webview.show(!editing && m_view == 2 && !mbdb_prefs::embedded_browser_disabled());
 	
     Invalidate();
 }
 
 LRESULT activity_window::OnContextMenu(UINT, WPARAM, LPARAM lp, BOOL&) {
     POINT pt = { GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
-    if (m_view == 1) { artists_context_menu(pt); return 0; }
+    if (m_view == 1) {
+        // The artists menu (delete, export, ...) acts on the table's selection, so the
+        // similar artists pane next to it gets a menu of its own.
+        if (pt.x != -1 || pt.y != -1) {
+            POINT client = pt;
+            ScreenToClient(&client);
+            if (PtInRect(&m_similar_rc, client)) { similar_context_menu(pt); return 0; }
+        }
+        artists_context_menu(pt);
+        return 0;
+    }
     if (m_view == 2) return 0; // the Rich Edit has its own menu
     if (pt.x == -1 && pt.y == -1) GetCursorPos(&pt); // keyboard-invoked
     HMENU menu = CreatePopupMenu();
@@ -411,7 +425,7 @@ void activity_window::paint(HDC dc, const RECT& rc) {
     const auto st = mbdb_activity::stats();
     const int x = pad, right = rc.right - pad;
     int y = pad;
-    for (int i = 2; i < 8; ++i) m_btn[i] = RECT(); // only the artists / now playing tabs have these buttons
+    for (int i = 2; i < 9; ++i) m_btn[i] = RECT(); // only the artists / now playing tabs have these buttons
     m_sb_track = RECT(); // set again by draw_scrollbar() when the list is long enough to scroll
     m_sb_thumb = RECT();
 

@@ -874,6 +874,46 @@ namespace {
 
     class artist_info_dialog;
 
+    // Size and position of the artist information window, kept between sessions. The
+    // rectangle is the restored (not maximized/minimized) one; width 0 means nothing saved yet.
+    const GUID guid_cfg_info_x = { 0x5b3a9e17, 0x6c40, 0x4d28, { 0x91, 0xa7, 0x3e, 0x0f, 0x82, 0xd6, 0x14, 0xb9 } };
+    const GUID guid_cfg_info_y = { 0xe20c7d84, 0x19fb, 0x4a53, { 0xb6, 0x2e, 0x7d, 0x48, 0x01, 0xc9, 0xa5, 0x3f } };
+    const GUID guid_cfg_info_w = { 0x93d1f6a0, 0x7e25, 0x4b8c, { 0x8a, 0x34, 0xc1, 0x5e, 0x96, 0x0b, 0x72, 0xd8 } };
+    const GUID guid_cfg_info_h = { 0x2f84b0c3, 0xa6d9, 0x4e71, { 0x95, 0x1c, 0x48, 0xe3, 0x7a, 0xd0, 0x6b, 0x25 } };
+    const GUID guid_cfg_info_max = { 0xd7a46e92, 0x3b18, 0x4c05, { 0xa9, 0x6d, 0x0e, 0x71, 0xf2, 0x84, 0xb3, 0x5c } };
+
+    cfg_int_t<int32_t> g_cfg_info_x(guid_cfg_info_x, 0);
+    cfg_int_t<int32_t> g_cfg_info_y(guid_cfg_info_y, 0);
+    cfg_int_t<int32_t> g_cfg_info_w(guid_cfg_info_w, 0);
+    cfg_int_t<int32_t> g_cfg_info_h(guid_cfg_info_h, 0);
+    cfg_int_t<int32_t> g_cfg_info_max(guid_cfg_info_max, 0);
+
+    // Moves/resizes a newly created window to the saved rectangle. Returns true when the
+    // window should be shown maximized. Does nothing (the dialog stays centred) when no
+    // size is saved or the saved position is no longer on any monitor.
+    bool restore_info_window_placement(HWND wnd) {
+        const int w = g_cfg_info_w.get_value(), h = g_cfg_info_h.get_value();
+        if (w <= 0 || h <= 0) return false;
+        const RECT rc = { g_cfg_info_x.get_value(), g_cfg_info_y.get_value(),
+                          g_cfg_info_x.get_value() + w, g_cfg_info_y.get_value() + h };
+        if (!::MonitorFromRect(&rc, MONITOR_DEFAULTTONULL)) return false;
+        ::SetWindowPos(wnd, nullptr, rc.left, rc.top, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
+        return g_cfg_info_max.get_value() != 0;
+    }
+
+    void save_info_window_placement(HWND wnd) {
+        WINDOWPLACEMENT wp = {};
+        wp.length = sizeof(wp);
+        if (!::GetWindowPlacement(wnd, &wp)) return;
+        const RECT& rc = wp.rcNormalPosition;
+        if (rc.right <= rc.left || rc.bottom <= rc.top) return;
+        g_cfg_info_x = rc.left;
+        g_cfg_info_y = rc.top;
+        g_cfg_info_w = rc.right - rc.left;
+        g_cfg_info_h = rc.bottom - rc.top;
+        g_cfg_info_max = (wp.showCmd == SW_SHOWMAXIMIZED) ? 1 : 0;
+    }
+
     std::map<std::string, artist_info_dialog*> g_open;
 
     // A record read from the database and turned into display content. Both steps run on
@@ -1270,6 +1310,7 @@ namespace {
         }
 
         void OnDestroy() {
+            save_info_window_placement(m_hWnd);
             KillTimer(kLoadTimerId);
             m_dark.on_colors_changed = {};
             m_dark.on_fonts_changed = {};
@@ -1361,8 +1402,10 @@ void mbdb_show_artist_info(const artist_list_item& item) {
 
     modeless_dialog_manager::g_add(dlg->m_hWnd);
 
+    const bool maximize = restore_info_window_placement(dlg->m_hWnd);
+
     dlg->begin_load(item);
-    dlg->ShowWindow(SW_SHOW);
+    dlg->ShowWindow(maximize ? SW_SHOWMAXIMIZED : SW_SHOW);
 }
 
 // ------------------------------------------------------------- panel API ---

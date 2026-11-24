@@ -10,6 +10,9 @@ namespace {
 // Preferences > Tools > MusicBrainz DB
 const GUID guid_prefs_page = { 0x88e02942, 0x8d89, 0x4878, { 0x9f, 0x79, 0x5c, 0x60, 0x42, 0xd9, 0xbb, 0xa8 } };
 
+// Preferences > Tools > MusicBrainz DB > Browser
+const GUID guid_prefs_browser_page = { 0x1d6e3f84, 0x2a7b, 0x4c95, { 0xb0, 0x48, 0x5e, 0x9a, 0xd3, 0x71, 0x0f, 0xc6 } };
+
 const GUID guid_cfg_debug_log    = { 0x4602f224, 0xbb4d, 0x4fa4, { 0xb0, 0x3d, 0x40, 0x86, 0xc9, 0xcd, 0x8e, 0x7e } };
 const GUID guid_cfg_artist_field = { 0x9c34da68, 0x9e46, 0x44b8, { 0x88, 0xd6, 0xa3, 0xa3, 0x81, 0x50, 0xf9, 0x35 } };
 const GUID guid_cfg_title_field  = { 0x6a400bd4, 0x3dee, 0x4c4b, { 0xb3, 0xff, 0xa4, 0x88, 0xa4, 0xc9, 0x1d, 0xec } };
@@ -24,9 +27,25 @@ constexpr unsigned k_min_rate_limit = 1;      // seconds; never allow less
 constexpr unsigned k_default_rate_limit = 2;  // seconds
 constexpr unsigned k_max_rate_limit = 60;     // seconds
 
+const GUID guid_cfg_auto_page     = { 0x3e7b1c52, 0x8d0a, 0x4f63, { 0xa1, 0x95, 0x6b, 0x2d, 0x0c, 0xe4, 0x7a, 0x18 } };
+
+const GUID guid_cfg_force_dark    = { 0x7a2f94d1, 0x13c8, 0x4e0b, { 0x8f, 0x5a, 0xc6, 0x31, 0xb9, 0x0d, 0x42, 0xe7 } };
+
+const GUID guid_cfg_block_ads     = { 0xc4d8e0a6, 0x5b27, 0x4a91, { 0x9e, 0x13, 0x08, 0xf7, 0x6a, 0x3b, 0x5c, 0xd2 } };
+
+const GUID guid_cfg_no_browser    = { 0x68b5d2e9, 0x40c1, 0x4f7a, { 0x83, 0x6e, 0x2a, 0xd9, 0x15, 0xc7, 0xb0, 0x4e } };
+
+constexpr bool k_default_no_browser = false;
+constexpr bool k_default_block_ads = false;
+constexpr bool k_default_force_dark = false;
+constexpr bool k_default_auto_page = false;
 constexpr bool k_default_debug_log = false; // debug logging is off unless the user enables it
 
 cfg_bool   g_cfg_debug_log(guid_cfg_debug_log, k_default_debug_log);
+cfg_bool   g_cfg_auto_page(guid_cfg_auto_page, k_default_auto_page);
+cfg_bool   g_cfg_force_dark(guid_cfg_force_dark, k_default_force_dark);
+cfg_bool   g_cfg_block_ads(guid_cfg_block_ads, k_default_block_ads);
+cfg_bool   g_cfg_no_browser(guid_cfg_no_browser, k_default_no_browser);
 cfg_string g_cfg_artist(guid_cfg_artist_field, "");
 cfg_string g_cfg_title(guid_cfg_title_field, "");
 cfg_int    g_cfg_dynamic_delay(guid_cfg_dynamic_delay, 0);
@@ -189,6 +208,79 @@ private:
     fb2k::CDarkModeHooks m_dark;
 };
 
+// Sub-page "Browser" under MusicBrainz DB: options of the Now playing browser.
+class mbdb_browser_prefs_instance : public CDialogImpl<mbdb_browser_prefs_instance>, public preferences_page_instance {
+public:
+    explicit mbdb_browser_prefs_instance(preferences_page_callback::ptr callback) : m_callback(callback) {}
+
+    enum { IDD = IDD_MBDB_PREFS_BROWSER };
+
+    t_uint32 get_state() override {
+        t_uint32 state = preferences_state::resettable | preferences_state::dark_mode_supported;
+        if (has_changed()) state |= preferences_state::changed;
+        return state;
+    }
+    HWND get_wnd() override { return m_hWnd; }
+
+    void apply() override {
+        g_cfg_no_browser = checked(IDC_NO_BROWSER);
+        g_cfg_force_dark = checked(IDC_FORCE_DARK_BROWSER);
+        g_cfg_block_ads = checked(IDC_BLOCK_ADS);
+        m_callback->on_state_changed();
+    }
+
+    void reset() override {
+        CheckDlgButton(IDC_NO_BROWSER, k_default_no_browser ? BST_CHECKED : BST_UNCHECKED);
+        CheckDlgButton(IDC_FORCE_DARK_BROWSER, k_default_force_dark ? BST_CHECKED : BST_UNCHECKED);
+        CheckDlgButton(IDC_BLOCK_ADS, k_default_block_ads ? BST_CHECKED : BST_UNCHECKED);
+        m_callback->on_state_changed();
+    }
+
+    BEGIN_MSG_MAP_EX(mbdb_browser_prefs_instance)
+        MSG_WM_INITDIALOG(OnInitDialog)
+        COMMAND_HANDLER_EX(IDC_NO_BROWSER, BN_CLICKED, OnEdited)
+        COMMAND_HANDLER_EX(IDC_FORCE_DARK_BROWSER, BN_CLICKED, OnEdited)
+        COMMAND_HANDLER_EX(IDC_BLOCK_ADS, BN_CLICKED, OnEdited)
+    END_MSG_MAP()
+
+private:
+    BOOL OnInitDialog(CWindow, LPARAM) {
+        m_dark.AddDialogWithControls(*this);
+        CheckDlgButton(IDC_NO_BROWSER, g_cfg_no_browser.get_value() ? BST_CHECKED : BST_UNCHECKED);
+        CheckDlgButton(IDC_FORCE_DARK_BROWSER, g_cfg_force_dark.get_value() ? BST_CHECKED : BST_UNCHECKED);
+        CheckDlgButton(IDC_BLOCK_ADS, g_cfg_block_ads.get_value() ? BST_CHECKED : BST_UNCHECKED);
+        return FALSE;
+    }
+
+    void OnEdited(UINT, int, CWindow) { m_callback->on_state_changed(); }
+
+    bool checked(int id) { return IsDlgButtonChecked(id) == BST_CHECKED; }
+
+    bool has_changed() {
+        return checked(IDC_NO_BROWSER) != g_cfg_no_browser.get_value()
+            || checked(IDC_FORCE_DARK_BROWSER) != g_cfg_force_dark.get_value()
+            || checked(IDC_BLOCK_ADS) != g_cfg_block_ads.get_value();
+    }
+
+    const preferences_page_callback::ptr m_callback;
+    fb2k::CDarkModeHooks m_dark;
+};
+
+class mbdb_browser_preferences_page : public preferences_page_v3 {
+public:
+    const char* get_name() { return "Browser"; }
+    GUID get_guid() { return guid_prefs_browser_page; }
+    GUID get_parent_guid() { return guid_prefs_page; }
+
+    preferences_page_instance::ptr instantiate(HWND parent, preferences_page_callback::ptr callback) override {
+        auto page = fb2k::service_new<mbdb_browser_prefs_instance>(callback);
+        page->Create(parent);
+        return page;
+    }
+};
+
+FB2K_SERVICE_FACTORY(mbdb_browser_preferences_page);
+
 class mbdb_preferences_page : public preferences_page_v3 {
 public:
     const char* get_name() { return "MusicBrainz DB"; }
@@ -209,6 +301,16 @@ FB2K_SERVICE_FACTORY(mbdb_preferences_page);
 namespace mbdb_prefs {
 
 bool debug_logging() { return g_cfg_debug_log.get_value(); }
+
+bool auto_load_artist_page() { return g_cfg_auto_page.get_value(); }
+
+void set_auto_load_artist_page(bool enabled) { g_cfg_auto_page = enabled; }
+
+bool force_dark_browser() { return g_cfg_force_dark.get_value(); }
+
+bool block_ads_in_browser() { return g_cfg_block_ads.get_value(); }
+
+bool embedded_browser_disabled() { return g_cfg_no_browser.get_value(); }
 
 unsigned dynamic_delay_seconds() {
     const t_int32 v = g_cfg_dynamic_delay.get_value();

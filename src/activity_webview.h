@@ -19,6 +19,16 @@ public:
     // Updates the browser's position and size in parent-client coordinates.
     void set_bounds(const RECT& bounds);
 
+    // Sets the colour scheme pages are told to prefer (prefers-color-scheme) and the colour
+    // shown before a page paints. Safe to call often; only changes are applied.
+    void set_dark(bool dark);
+
+    // Shows an empty page (about:blank).
+    void navigate_blank();
+
+    // Turns ad, tracker and unsolicited pop-up blocking on or off. Safe to call often.
+    void set_block_ads(bool block);
+
     // Shows or hides the browser.
     void show(bool visible);
 
@@ -29,6 +39,9 @@ public:
     void close();
 
     bool is_ready() const;
+
+    // True once create() has been called (and close() has not).
+    bool exists() const;
 
 public:
     struct state;

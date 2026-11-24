@@ -3,40 +3,56 @@
 
 // Child dialog hosted by Preferences > Tools > MusicBrainz DB.
 // Sizes are in dialog units, so the page scales with DPI and the UI font.
-IDD_MBDB_PREFS DIALOGEX 0, 0, 270, 300
+IDD_MBDB_PREFS DIALOGEX 0, 0, 270, 246
 STYLE DS_SETFONT | WS_CHILD
 FONT 8, "MS Shell Dlg", 0, 0, 0x0
 BEGIN
-    GROUPBOX        "Logging", IDC_STATIC, 4, 4, 256, 30
+    GROUPBOX        "Logging", IDC_STATIC, 4, 4, 256, 26
     CONTROL         "Enable debug logging to the console (View > Console)", IDC_DEBUG_LOG,
-                    "Button", BS_AUTOCHECKBOX | WS_TABSTOP, 12, 16, 240, 12
+                    "Button", BS_AUTOCHECKBOX | WS_TABSTOP, 12, 14, 240, 12
 
-    GROUPBOX        "Custom track fields", IDC_STATIC, 4, 40, 256, 100
+    GROUPBOX        "Custom track fields", IDC_STATIC, 4, 33, 256, 86
     LTEXT           "Titleformatting patterns used instead of the plain artist and title tags",
-                    IDC_STATIC, 12, 51, 240, 18
-    LTEXT           "&Artist field:", IDC_STATIC, 12, 72, 56, 8
-    EDITTEXT        IDC_ARTIST_FIELD, 72, 70, 180, 13, ES_AUTOHSCROLL
-    LTEXT           "&Title field:", IDC_STATIC, 12, 88, 56, 8
-    EDITTEXT        IDC_TITLE_FIELD, 72, 86, 180, 13, ES_AUTOHSCROLL
+                    IDC_STATIC, 12, 43, 240, 18
+    LTEXT           "&Artist field:", IDC_STATIC, 12, 65, 56, 8
+    EDITTEXT        IDC_ARTIST_FIELD, 72, 63, 180, 13, ES_AUTOHSCROLL
+    LTEXT           "&Title field:", IDC_STATIC, 12, 81, 56, 8
+    EDITTEXT        IDC_TITLE_FIELD, 72, 79, 180, 13, ES_AUTOHSCROLL
     LTEXT           "Examples: %album artist%   $if2(%artist%,%album artist%)   %title%",
-                    IDC_STATIC, 12, 103, 240, 12
-    LTEXT           "", IDC_FIELDS_STATUS, 12, 116, 240, 10
+                    IDC_STATIC, 12, 95, 240, 10
+    LTEXT           "", IDC_FIELDS_STATUS, 12, 106, 240, 10
 
-       GROUPBOX        "Stream metadata (dynamic info)", IDC_STATIC, 4, 144, 256, 32
-    LTEXT           "&Delay search by:", IDC_STATIC, 12, 158, 64, 8
-    EDITTEXT        IDC_DYNAMIC_DELAY, 78, 156, 30, 13, ES_AUTOHSCROLL | ES_NUMBER
-    LTEXT           "seconds (0 = search immediately)", IDC_STATIC, 114, 158, 138, 8
+    GROUPBOX        "Stream metadata (dynamic info)", IDC_STATIC, 4, 122, 256, 28
+    LTEXT           "&Delay search by:", IDC_STATIC, 12, 135, 64, 8
+    EDITTEXT        IDC_DYNAMIC_DELAY, 78, 133, 30, 13, ES_AUTOHSCROLL | ES_NUMBER
+    LTEXT           "seconds (0 = search immediately)", IDC_STATIC, 114, 135, 138, 8
 
-    GROUPBOX        "MusicBrainz requests", IDC_STATIC, 4, 180, 256, 32
-    LTEXT           "&Rate limit: wait", IDC_STATIC, 12, 194, 64, 8
-    EDITTEXT        IDC_RATE_LIMIT, 78, 192, 30, 13, ES_AUTOHSCROLL | ES_NUMBER
-    LTEXT           "seconds between requests (minimum 1)", IDC_STATIC, 114, 194, 138, 8
+    GROUPBOX        "MusicBrainz requests", IDC_STATIC, 4, 153, 256, 28
+    LTEXT           "&Rate limit: wait", IDC_STATIC, 12, 166, 64, 8
+    EDITTEXT        IDC_RATE_LIMIT, 78, 164, 30, 13, ES_AUTOHSCROLL | ES_NUMBER
+    LTEXT           "seconds between requests (minimum 1)", IDC_STATIC, 114, 166, 138, 8
 
-    GROUPBOX        "ListenBrainz Similar Artists", IDC_STATIC, 4, 216, 256, 62
-    LTEXT           "Algorithm:", IDC_STATIC, 12, 228, 44, 8
-    COMBOBOX        IDC_LB_ALGORITHM, 58, 226, 194, 100, CBS_DROPDOWN | CBS_AUTOHSCROLL | WS_VSCROLL | WS_TABSTOP
-    PUSHBUTTON      "Load choices", IDC_LB_LOAD_ALGORITHMS, 58, 243, 70, 14
-    LTEXT           "", IDC_LB_ALGORITHM_STATUS, 12, 260, 240, 12
+    GROUPBOX        "ListenBrainz Similar Artists", IDC_STATIC, 4, 184, 256, 56
+    LTEXT           "Algorithm:", IDC_STATIC, 12, 196, 44, 8
+    COMBOBOX        IDC_LB_ALGORITHM, 58, 194, 194, 100, CBS_DROPDOWN | CBS_AUTOHSCROLL | WS_VSCROLL | WS_TABSTOP
+    PUSHBUTTON      "Load choices", IDC_LB_LOAD_ALGORITHMS, 58, 211, 70, 14
+    LTEXT           "", IDC_LB_ALGORITHM_STATUS, 12, 227, 240, 10
+END
+
+// Child dialog hosted by Preferences > Tools > MusicBrainz DB > Browser.
+IDD_MBDB_PREFS_BROWSER DIALOGEX 0, 0, 270, 100
+STYLE DS_SETFONT | WS_CHILD
+FONT 8, "MS Shell Dlg", 0, 0, 0x0
+BEGIN
+    GROUPBOX        "Now playing browser", IDC_STATIC, 4, 4, 256, 90
+    CONTROL         "Do not use the embedded browser (artist information uses the full width; links open in your default browser)", IDC_NO_BROWSER,
+                    "Button", BS_AUTOCHECKBOX | BS_MULTILINE | WS_TABSTOP, 12, 16, 240, 22
+    CONTROL         "Block ads, trackers and pop-ups (takes effect immediately)", IDC_BLOCK_ADS,
+                    "Button", BS_AUTOCHECKBOX | WS_TABSTOP, 12, 42, 240, 12
+    CONTROL         "Force dark mode (restart foobar2000 to apply)", IDC_FORCE_DARK_BROWSER,
+                    "Button", BS_AUTOCHECKBOX | WS_TABSTOP, 12, 58, 240, 12
+    LTEXT           "Extra domains to block can be listed in <profile>\\foo_musicbrainz_db\\adblock.txt.",
+                    IDC_STATIC, 12, 74, 240, 18
 END
 
 // Modeless window opened by double-clicking an artist in the panel's artists tab.

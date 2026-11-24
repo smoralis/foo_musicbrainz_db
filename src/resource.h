@@ -2,6 +2,7 @@
 // Resource IDs for the preferences page dialog (preferences.rc).
 #define IDD_MBDB_PREFS          101
 #define IDD_MBDB_ARTIST_INFO    102
+#define IDD_MBDB_PREFS_BROWSER  103
 
 #define IDC_DEBUG_LOG           1001
 #define IDC_ARTIST_FIELD        1002
@@ -13,6 +14,9 @@
 #define IDC_LB_LOAD_ALGORITHMS   1008
 #define IDC_LB_ALGORITHM_STATUS 1009
 #define IDC_INFO_TEXT           1010
+#define IDC_NO_BROWSER          1011
+#define IDC_FORCE_DARK_BROWSER  1012
+#define IDC_BLOCK_ADS           1013
 #define IDC_RAW_JSON  			1205
 
 #ifndef IDC_STATIC

@@ -13,8 +13,11 @@
 #include <commdlg.h>
 #include <algorithm>
 #include <cctype>
+#include <filesystem>
+#include <fstream>
 #include <set>
 #include <unordered_set>
+#include <nlohmann/json.hpp>
 
 using namespace actutil;
 
@@ -463,6 +466,113 @@ void activity_window::artists_context_menu(POINT screen_pt) {
     case 6: reload_artists(); break;
     default: break;
     }
+}
+
+// Right-click menu of the similar artists pane: acts on the clicked row (which it selects)
+// or on the whole list.
+void activity_window::similar_context_menu(POINT screen_pt) {
+    POINT client = screen_pt;
+    ScreenToClient(&client);
+    if (m_similar_row_height > 0 && client.y >= m_similar_row_top && !PtInRect(&m_similar_sb_track, client)) {
+        const size_t index = m_similar_scroll + static_cast<size_t>((client.y - m_similar_row_top) / m_similar_row_height);
+        if (index < m_similar_rows.size()) {
+            m_similar_selected = static_cast<long long>(index);
+            Invalidate(FALSE);
+        }
+    }
+
+    const bool has_row = m_similar_selected >= 0 && static_cast<size_t>(m_similar_selected) < m_similar_rows.size();
+    const listenbrainz_similar_artist row = has_row ? m_similar_rows[static_cast<size_t>(m_similar_selected)] : listenbrainz_similar_artist();
+    bool stored = false;
+    if (has_row) {
+        auto lower = [](std::string s) {
+            for (auto& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            return s;
+        };
+        const std::string id = lower(row.mbid);
+        for (const auto& r : m_rows) if (lower(r.mbid) == id) { stored = true; break; }
+    }
+
+    HMENU menu = CreatePopupMenu();
+    AppendMenuW(menu, MF_STRING | (has_row ? 0 : MF_GRAYED), 1, L"Open artist information");
+    AppendMenuW(menu, MF_STRING | (has_row && !stored && !row.mbid.empty() ? 0 : MF_GRAYED), 2,
+        stored ? L"Download this artist (already stored)" : L"Download this artist");
+    AppendMenuW(menu, MF_STRING | (has_row ? 0 : MF_GRAYED), 3, L"Copy MBID");
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_STRING | (m_similar_rows.empty() ? MF_GRAYED : 0), 4, L"Export similar artists list...");
+    const int cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, screen_pt.x, screen_pt.y, 0, m_hWnd, nullptr);
+    DestroyMenu(menu);
+
+    switch (cmd) {
+    case 1: {
+        artist_list_item item;
+        item.mbid = row.mbid;
+        item.name = row.name;
+        item.type = row.type;
+        mbdb_show_artist_info(item);
+        break;
+    }
+    case 2:
+        mbdb_search_artist_mbids({ row.mbid });
+        Invalidate(FALSE);
+        break;
+    case 3:
+        set_clipboard_text(m_hWnd, widen(row.mbid));
+        break;
+    case 4:
+        export_similar_list();
+        break;
+    default:
+        break;
+    }
+}
+
+// Saves the similar artists shown in the pane (name, MBID, score, ...) as a JSON file.
+void activity_window::export_similar_list() {
+    if (m_similar_rows.empty()) return;
+    wchar_t file[MAX_PATH] = {};
+    wcscpy_s(file, L"musicbrainz_similar_artists.json");
+    OPENFILENAMEW ofn = {};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = m_hWnd;
+    ofn.lpstrFilter = L"JSON files (*.json)\0*.json\0All files (*.*)\0*.*\0";
+    ofn.lpstrFile = file;
+    ofn.nMaxFile = MAX_PATH;
+    ofn.lpstrDefExt = L"json";
+    ofn.lpstrTitle = L"Export similar artists";
+    ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+    if (!GetSaveFileNameW(&ofn)) return;
+
+    nlohmann::json out;
+    out["source_artist_mbid"] = m_similar_requested_mbid;
+    out["algorithm"] = mbdb_prefs::listenbrainz_similar_artists_algorithm();
+    out["similar_artists"] = nlohmann::json::array();
+    for (const auto& a : m_similar_rows) {
+        nlohmann::json item;
+        item["name"] = a.name;
+        item["mbid"] = a.mbid;
+        item["score"] = a.score;
+        item["type"] = a.type;
+        item["gender"] = a.gender;
+        item["comment"] = a.comment;
+        out["similar_artists"].push_back(std::move(item));
+    }
+
+    const std::wstring path = file;
+    bool ok = false;
+    try {
+        std::ofstream stream{ std::filesystem::path(path), std::ios::binary | std::ios::trunc };
+        if (stream) {
+            stream << out.dump(2, ' ', false, nlohmann::json::error_handler_t::replace) << "\n";
+            ok = static_cast<bool>(stream);
+        }
+    } catch (...) {
+        ok = false;
+    }
+    const std::string text = ok
+        ? "Exported " + std::to_string(m_similar_rows.size()) + " similar artist(s) to " + narrow(path)
+        : "Export failed: could not write " + narrow(path);
+    mbdb_activity::add_event(ok ? mbdb_activity::lvl_good : mbdb_activity::lvl_error, text.c_str());
 }
 
 // ----------------------------------------------------------------- input ---

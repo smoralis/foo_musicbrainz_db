@@ -148,6 +148,8 @@ private:
     bool artists_dbl_click(POINT pt);     // opens the artist info window
     void artists_wheel(int steps);
     void artists_context_menu(POINT screen_pt);
+    void similar_context_menu(POINT screen_pt);
+    void export_similar_list();
     void reload_artists();   // asks the background thread for a fresh list
     bool poll_reload();      // installs a finished list; true if anything changed
     void request_similar_artists();
@@ -184,7 +186,8 @@ private:
     // 2 = Delete selected, 3 = Export JSON, 4 = Refresh (artists tab only).
     // 6 = Download similar artists (similar pane of the artists tab).
     // 7 = Download similar artists of the selected rows (artists toolbar).
-    RECT m_btn[8] = {};
+    // 8 = Auto-open MusicBrainz page toggle (Now playing tab).
+    RECT m_btn[9] = {};
     int m_hot = -1, m_down = -1;
     RECT m_sb_track = {}, m_sb_thumb = {};   // empty when the list fits
     size_t m_sb_total = 0, m_sb_visible = 0;
@@ -202,6 +205,8 @@ private:
     std::shared_ptr<const mbdb_info_content> m_np_content; // ready-to-render sections for the record
     std::shared_ptr<activity_np_fetch> m_np_fetch;
     bool m_tracking = false;
+    bool m_np_page_blank = false;           // the browser was blanked while looking up / not found
+    std::string m_np_page_mbid;             // artist whose MusicBrainz page was opened automatically
 	activity_webview m_webview;
 		
     // Artists tab
