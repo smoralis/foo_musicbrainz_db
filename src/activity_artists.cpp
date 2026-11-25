@@ -577,13 +577,22 @@ void activity_window::export_similar_list() {
 
 // ----------------------------------------------------------------- input ---
 
+// Tabs left to right: Activity | Artists | Selected Artist | Now playing. The view numbers
+// (0 activity, 1 artists, 2 now playing, 3 selected item) are fixed, so this maps position to view.
+static const int k_tab_views[4] = { 0, 1, 3, 2 };
+
 bool activity_window::tab_mouse_down(POINT pt) {
-    for (int i = 0; i < 3; ++i) {
-        if (!PtInRect(&m_tab[i], pt)) continue;
+    for (int pos = 0; pos < 4; ++pos) {
+        if (!PtInRect(&m_tab[pos], pt)) continue;
+        const int i = k_tab_views[pos];
         if (m_view != i) {
+            const bool source_changed = (m_view == 3) != (i == 3); // Selected Artist <-> the other views
             m_view = i;
-            if (i == 1 && (!m_rows_loaded || m_rows_revision != mbdb_activity::db_revision())) reload_artists();
-            if (i == 2) m_np_dirty = true; // render the playing artist when the tab opens
+            if (source_changed) reset_info_source();
+            // The Selected Artist tab shows a row of the Artists table, so that must be loaded.
+            if ((i == 1 || i == 3) && (!m_rows_loaded || m_rows_revision != mbdb_activity::db_revision())) reload_artists();
+            if (i == 3) adopt_table_focus();
+            if (i == 2 || i == 3) m_np_dirty = true; // render the artist when the tab opens
             Invalidate(FALSE);
         }
         return true;
@@ -770,14 +779,15 @@ void activity_window::draw_button(HDC dc, int index, const std::wstring& label) 
 }
 
 void activity_window::paint_tabs(HDC dc, int x, int right, int& y, int line_h, int gap, int dpi, long long db_artists) {
-    const std::wstring labels[3] = {
+    const std::wstring labels[4] = {
         L"Activity",
         db_artists >= 0 ? L"Artists (" + format_count(static_cast<unsigned long long>(db_artists)) + L")" : std::wstring(L"Artists"),
+        L"Selected Artist",
         L"Now playing" };
     const int padx = MulDiv(12, dpi, 96);
     int tx = x;
-    for (int i = 0; i < 3; ++i) {
-        const bool active = m_view == i;
+    for (int i = 0; i < 4; ++i) {
+        const bool active = m_view == k_tab_views[i];
         SelectObject(dc, active && m_bold ? m_bold : m_font);
         const int w = text_width(dc, labels[i]) + 2 * padx;
         m_tab[i] = { tx, y, tx + w, y + line_h };

@@ -35,6 +35,9 @@ const GUID guid_cfg_block_ads     = { 0xc4d8e0a6, 0x5b27, 0x4a91, { 0x9e, 0x13, 
 
 const GUID guid_cfg_no_browser    = { 0x68b5d2e9, 0x40c1, 0x4f7a, { 0x83, 0x6e, 0x2a, 0xd9, 0x15, 0xc7, 0xb0, 0x4e } };
 
+const GUID guid_cfg_show_picker   = { 0xa91c4e37, 0x52d8, 0x4b60, { 0x9f, 0x2a, 0x7e, 0x13, 0xc8, 0x40, 0xd5, 0x6b } };
+
+constexpr bool k_default_show_picker = true;
 constexpr bool k_default_no_browser = false;
 constexpr bool k_default_block_ads = false;
 constexpr bool k_default_force_dark = false;
@@ -46,6 +49,7 @@ cfg_bool   g_cfg_auto_page(guid_cfg_auto_page, k_default_auto_page);
 cfg_bool   g_cfg_force_dark(guid_cfg_force_dark, k_default_force_dark);
 cfg_bool   g_cfg_block_ads(guid_cfg_block_ads, k_default_block_ads);
 cfg_bool   g_cfg_no_browser(guid_cfg_no_browser, k_default_no_browser);
+cfg_bool   g_cfg_show_picker(guid_cfg_show_picker, k_default_show_picker);
 cfg_string g_cfg_artist(guid_cfg_artist_field, "");
 cfg_string g_cfg_title(guid_cfg_title_field, "");
 cfg_int    g_cfg_dynamic_delay(guid_cfg_dynamic_delay, 0);
@@ -311,6 +315,10 @@ bool force_dark_browser() { return g_cfg_force_dark.get_value(); }
 bool block_ads_in_browser() { return g_cfg_block_ads.get_value(); }
 
 bool embedded_browser_disabled() { return g_cfg_no_browser.get_value(); }
+
+bool show_artist_picker() { return g_cfg_show_picker.get_value(); }
+
+void set_show_artist_picker(bool shown) { g_cfg_show_picker = shown; }
 
 unsigned dynamic_delay_seconds() {
     const t_int32 v = g_cfg_dynamic_delay.get_value();

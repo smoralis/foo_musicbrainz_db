@@ -17,6 +17,7 @@
 
 namespace {
 const GUID guid_cui_nowplaying = { 0xbad49171, 0x1b85, 0x4f5b, { 0x8e, 0x0e, 0x4c, 0x1d, 0x66, 0xb0, 0xa4, 0xf1 } };
+const GUID guid_cui_selected = { 0x7e1a52c8, 0x3d94, 0x4f06, { 0xa8, 0x2b, 0x91, 0x6c, 0x0d, 0xf4, 0x35, 0xe7 } };
 const GUID guid_cui_activity = { 0xc8543529, 0x2e8d, 0x4a4e, { 0x92, 0xfb, 0x0f, 0x44, 0x0a, 0x79, 0x7c, 0xd7 } };
 
 // Colours come from Columns UI's global colour scheme (including its dark mode).
@@ -32,13 +33,14 @@ private:
     cui::colours::helper m_helper{ pfc::guid_null };
 };
 
-// NowPlaying == true is the standalone "Now playing" panel; false is the full activity panel.
-template <bool NowPlaying>
+// Mode 0 is the full activity panel, 1 the standalone "Now playing" panel and 2 the standalone
+// "Selected Artist" panel.
+template <int Mode>
 class cui_panel_t : public uie::window {
 public:
-    const GUID& get_extension_guid() const override { return NowPlaying ? guid_cui_nowplaying : guid_cui_activity; }
+    const GUID& get_extension_guid() const override { return Mode == 1 ? guid_cui_nowplaying : Mode == 2 ? guid_cui_selected : guid_cui_activity; }
     void get_name(pfc::string_base& out) const override {
-        out = NowPlaying ? "MusicBrainz DB now playing" : "MusicBrainz DB activity";
+        out = Mode == 1 ? "MusicBrainz DB now playing" : Mode == 2 ? "MusicBrainz DB selected artist" : "MusicBrainz DB activity";
     }
     void get_category(pfc::string_base& out) const override { out = "Panels"; }
     unsigned get_type() const override { return uie::type_panel; }
@@ -59,7 +61,8 @@ public:
         } else {
             m_window_host = host;
             m_window.set_host(&m_colours);
-            if (NowPlaying) m_window.show_now_playing_only();
+            if (Mode == 1) m_window.show_now_playing_only();
+            if (Mode == 2) m_window.show_selected_only();
             // x/y/cx/cy are not all the same signedness, so convert explicitly.
             const LONG left = static_cast<LONG>(position.x), top = static_cast<LONG>(position.y);
             RECT rc = { left, top, left + static_cast<LONG>(position.cx), top + static_cast<LONG>(position.cy) };
@@ -80,7 +83,8 @@ private:
     uie::window_host_ptr m_window_host;
 };
 
-uie::window_factory<cui_panel_t<false>> g_cui_activity_factory;
-uie::window_factory<cui_panel_t<true>> g_cui_nowplaying_factory;
+uie::window_factory<cui_panel_t<0>> g_cui_activity_factory;
+uie::window_factory<cui_panel_t<1>> g_cui_nowplaying_factory;
+uie::window_factory<cui_panel_t<2>> g_cui_selected_factory;
 } // namespace
 #endif // MBDB_HAVE_CUI

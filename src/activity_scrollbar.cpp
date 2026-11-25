@@ -8,12 +8,12 @@
 using namespace actutil;
 
 size_t activity_window::scroll_max() const {
-    return m_view == 1 ? m_amax_scroll : m_max_scroll;
+    return m_view == 1 ? m_amax_scroll : m_view == 3 ? m_pmax_scroll : m_max_scroll;
 }
 
 void activity_window::set_scroll(long long offset) {
     offset = (std::max)(0LL, (std::min)(offset, static_cast<long long>(scroll_max())));
-    size_t& target = m_view == 1 ? m_ascroll : m_scroll;
+    size_t& target = m_view == 1 ? m_ascroll : m_view == 3 ? m_pscroll : m_scroll;
     if (static_cast<size_t>(offset) != target) {
         target = static_cast<size_t>(offset);
         Invalidate(FALSE);
@@ -66,7 +66,7 @@ bool activity_window::scrollbar_mouse_down(POINT pt) {
     }
     // Clicking the track pages towards the click, like a normal scrollbar.
     const long long page = static_cast<long long>((std::max)(static_cast<size_t>(1), m_sb_visible > 0 ? m_sb_visible - 1 : 1));
-    const long long offset = static_cast<long long>(m_view == 1 ? m_ascroll : m_scroll);
+    const long long offset = static_cast<long long>(m_view == 1 ? m_ascroll : m_view == 3 ? m_pscroll : m_scroll);
     set_scroll(pt.y < m_sb_thumb.top ? offset - page : offset + page);
     return true;
 }

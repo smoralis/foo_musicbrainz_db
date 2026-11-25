@@ -39,6 +39,11 @@ bool block_ads_in_browser();
 // artist information over its full width, and links open in the default browser.
 bool embedded_browser_disabled();
 
+// Whether the Selected Artist tab shows its search box and artist list (toggled by a button on
+// that tab; remembered between sessions; on by default).
+bool show_artist_picker();
+void set_show_artist_picker(bool shown);
+
 }
 
 // ListenBrainz Labs Similar Artists algorithm identifier.

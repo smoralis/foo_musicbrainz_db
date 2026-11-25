@@ -22,11 +22,13 @@ bool mbdb_info_has_raw(const mbdb_info_content& content);
 // highlighted raw JSON. `background`/`text` override the theme colours (CLR_INVALID keeps
 // them) and `font` (the host's font, not owned) the text font; nullptr uses the active UI's font.
 void mbdb_info_render(HWND edit, const mbdb_info_content& content, bool show_raw,
-                      bool dark, COLORREF background, COLORREF text, HFONT font);
+                      bool dark, COLORREF background, COLORREF text, HFONT font,
+                      COLORREF link = CLR_INVALID); // link: hyperlink colour, CLR_INVALID = theme default
 
 // Fills the control with a plain message (nothing playing, looking up, not found...).
 void mbdb_info_render_message(HWND edit, const std::string& message, bool dark,
-                              COLORREF background, COLORREF text, HFONT font);
+                              COLORREF background, COLORREF text, HFONT font,
+                              COLORREF link = CLR_INVALID);
 
 // Returns the validated URL represented by an EN_LINK notification.
 // Returns an empty string if the notification is not a supported link.

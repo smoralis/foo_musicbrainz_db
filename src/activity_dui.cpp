@@ -17,6 +17,13 @@ namespace
     const GUID guid_dui_nowplaying =
         { 0xf332ea91, 0xd32f, 0x4ada, { 0x82, 0x82, 0xeb, 0x64, 0x19, 0xb1, 0x5c, 0x3a } };
 
+    // The standalone "selected artist" element.
+    const GUID guid_dui_selected =
+        { 0x4b6e0d27, 0x9a13, 0x4c58, { 0xb3, 0x7f, 0x25, 0xe8, 0x61, 0xd0, 0x94, 0xa2 } };
+
+    // What a window shows: the full activity window, or one standalone view.
+    enum window_mode { mode_activity = 0, mode_now_playing = 1, mode_selected_artist = 2 };
+
 
     // ============================================================
     // UI element instance
@@ -31,12 +38,12 @@ namespace
             ui_element_config::ptr config,
             ui_element_instance_callback_ptr callback,
             const GUID& guid,
-            bool now_playing_only
+            int mode
         )
             : m_callback(callback)
             , m_config(config)
             , m_guid(guid)
-            , m_np_only(now_playing_only)
+            , m_mode(mode)
         {
         }
 
@@ -53,9 +60,13 @@ namespace
         {
             m_window.set_host(this);
 
-            if (m_np_only)
+            if (m_mode == mode_now_playing)
             {
                 m_window.show_now_playing_only();
+            }
+            else if (m_mode == mode_selected_artist)
+            {
+                m_window.show_selected_only();
             }
 
             return m_window.Create(
@@ -152,6 +163,19 @@ namespace
             return true;
         }
 
+        bool query_highlight_colour(COLORREF& highlight) override
+        {
+            t_ui_color color;
+
+            if (m_callback.is_valid() && m_callback->query_color(ui_color_highlight, color))
+            {
+                highlight = static_cast<COLORREF>(color);
+                return true;
+            }
+
+            return false;
+        }
+
         bool is_edit_mode() override
         {
             return m_callback.is_valid() && m_callback->is_edit_mode_enabled();
@@ -173,7 +197,7 @@ namespace
         ui_element_instance_callback_ptr m_callback;
         ui_element_config::ptr m_config;
         GUID m_guid;
-        bool m_np_only;
+        int m_mode;
     };
 
 
@@ -182,7 +206,7 @@ namespace
     // ============================================================
 
     // One implementation for both elements: they differ only in GUID, name and
-    // whether the window shows just the "Now playing" view.
+    // which view the window shows (activity, or one standalone view).
     class dui_element_base : public ui_element
     {
     public:
@@ -190,12 +214,12 @@ namespace
             const GUID& guid,
             const char* name,
             const char* description,
-            bool now_playing_only
+            int mode
         )
             : m_guid(guid)
             , m_name(name)
             , m_description(description)
-            , m_np_only(now_playing_only)
+            , m_mode(mode)
         {
         }
 
@@ -233,7 +257,7 @@ namespace
                     config,
                     callback,
                     m_guid,
-                    m_np_only
+                    m_mode
                 );
 
             // The UI element window must exist before instantiate()
@@ -260,7 +284,7 @@ namespace
         GUID m_guid;
         const char* m_name;
         const char* m_description;
-        bool m_np_only;
+        int m_mode;
     };
 
     class dui_activity_element : public dui_element_base
@@ -271,7 +295,7 @@ namespace
                 guid_dui_activity,
                 "MusicBrainz DB activity",
                 "Shows MusicBrainz lookup events and database statistics.",
-                false)
+                mode_activity)
         {
         }
     };
@@ -284,7 +308,20 @@ namespace
                 guid_dui_nowplaying,
                 "MusicBrainz DB now playing",
                 "Shows the MusicBrainz information of the playing track's artist.",
-                true)
+                mode_now_playing)
+        {
+        }
+    };
+
+    class dui_selected_element : public dui_element_base
+    {
+    public:
+        dui_selected_element()
+            : dui_element_base(
+                guid_dui_selected,
+                "MusicBrainz DB selected artist",
+                "Pick an artist from a searchable list and show its MusicBrainz information.",
+                mode_selected_artist)
         {
         }
     };
@@ -296,5 +333,8 @@ namespace
 
     static service_factory_single_t<dui_nowplaying_element>
         g_dui_nowplaying_factory;
+
+    static service_factory_single_t<dui_selected_element>
+        g_dui_selected_factory;
 
 } // anonymous namespace

@@ -10,6 +10,8 @@
 
 #include <windows.h>
 #include <winhttp.h>
+#include <wininet.h>
+#pragma comment(lib, "wininet.lib")
 
 #include <nlohmann/json.hpp>
 
@@ -418,6 +420,198 @@ namespace {
 // retry_after:
 //   Retry-After delay in seconds, if supplied by the server.
 
+// The first bytes of a response, printable, for log messages about a body that is not JSON.
+static std::string response_prefix(const std::string& body) {
+    std::string out;
+    const size_t n = (std::min)(body.size(), static_cast<size_t>(80));
+    for (size_t i = 0; i < n; ++i) {
+        const unsigned char c = static_cast<unsigned char>(body[i]);
+        if (c >= 0x20 && c < 0x7F) {
+            out.push_back(static_cast<char>(c));
+        } else {
+            char esc[8];
+            snprintf(esc, sizeof(esc), "\\x%02X", c);
+            out += esc;
+        }
+    }
+    return out;
+}
+
+// Some HTTP stacks (seen under Wine) hand over the body with its framing still in it:
+// a UTF-8 byte order mark, or chunked transfer coding ("<hex size>\r\n<data>\r\n ... 0\r\n\r\n").
+// Both are removed here; a body that is already plain JSON is left alone.
+static void normalize_response_body(std::string& body) {
+    if (body.size() >= 3 && static_cast<unsigned char>(body[0]) == 0xEF &&
+        static_cast<unsigned char>(body[1]) == 0xBB && static_cast<unsigned char>(body[2]) == 0xBF) {
+        body.erase(0, 3);
+        MBDB_LOG("http: removed a UTF-8 byte order mark from the response");
+    }
+
+    if (body.empty() || !std::isxdigit(static_cast<unsigned char>(body[0])))
+        return; // JSON starts with '{' or '['
+
+    std::string decoded;
+    size_t pos = 0;
+    for (;;) {
+        const size_t eol = body.find("\r\n", pos);
+        if (eol == std::string::npos || eol == pos || eol - pos > 8 + 64) return; // not chunked
+        std::string size_text = body.substr(pos, eol - pos);
+        const size_t ext = size_text.find(';');
+        if (ext != std::string::npos) size_text.erase(ext);
+        if (size_text.empty() || size_text.size() > 8) return;
+        for (char c : size_text)
+            if (!std::isxdigit(static_cast<unsigned char>(c))) return;
+        const size_t size = static_cast<size_t>(std::stoul(size_text, nullptr, 16));
+        pos = eol + 2;
+        if (size == 0) break; // last chunk
+        if (pos + size > body.size()) return;
+        decoded.append(body, pos, size);
+        pos += size;
+        if (body.compare(pos, 2, "\r\n") != 0) return;
+        pos += 2;
+    }
+
+    MBDB_LOG("http: removed chunked transfer coding from the response (%zu -> %zu bytes)",
+        body.size(), decoded.size());
+    body = std::move(decoded);
+}
+
+// ---------------------------------------------------------------------------------------
+// WinINet transport. Under Wine the WinHTTP stack was seen to deliver larger bodies without
+// their beginning (the size still matched Content-Length), so such a response is fetched again
+// through WinINet, which is a separate implementation; if that delivers a sane body, WinINet
+// is used for the rest of the session. Same request, same headers, same result handling.
+// ---------------------------------------------------------------------------------------
+static std::atomic<bool> g_use_wininet{ false };
+
+static bool wininet_request(
+    const std::wstring& path,
+    std::string& response,
+    DWORD& status,
+    int& retry_after)
+{
+    response.clear();
+    status = 0;
+    retry_after = 0;
+
+    HINTERNET net = InternetOpenW(
+        L"foo_musicbrainz_db/0.1.3 (contact: https://github.com/smoralis/foo_musicbrainz_db)",
+        INTERNET_OPEN_TYPE_PRECONFIG,
+        nullptr,
+        nullptr,
+        0);
+    if (!net) {
+        MBDB_LOG("wininet: InternetOpen failed (err %lu)", GetLastError());
+        return false;
+    }
+
+    const DWORD timeout_ms = 20000;
+    InternetSetOptionW(net, INTERNET_OPTION_CONNECT_TIMEOUT, const_cast<DWORD*>(&timeout_ms), sizeof(timeout_ms));
+    InternetSetOptionW(net, INTERNET_OPTION_SEND_TIMEOUT, const_cast<DWORD*>(&timeout_ms), sizeof(timeout_ms));
+    InternetSetOptionW(net, INTERNET_OPTION_RECEIVE_TIMEOUT, const_cast<DWORD*>(&timeout_ms), sizeof(timeout_ms));
+
+    bool ok = false;
+    DWORD error = ERROR_SUCCESS;
+
+    HINTERNET conn = InternetConnectW(
+        net, L"musicbrainz.org", INTERNET_DEFAULT_HTTPS_PORT,
+        nullptr, nullptr, INTERNET_SERVICE_HTTP, 0, 0);
+
+    HINTERNET req = nullptr;
+    if (conn) {
+        const wchar_t* accept[] = { L"application/json", nullptr };
+        req = HttpOpenRequestW(
+            conn, L"GET", path.c_str(), nullptr, nullptr, accept,
+            INTERNET_FLAG_SECURE | INTERNET_FLAG_RELOAD | INTERNET_FLAG_NO_CACHE_WRITE |
+            INTERNET_FLAG_NO_COOKIES | INTERNET_FLAG_NO_UI,
+            0);
+    }
+
+    if (!conn || !req) {
+        error = GetLastError();
+    }
+    else if (!HttpSendRequestW(req, nullptr, 0, nullptr, 0)) {
+        error = GetLastError();
+    }
+    else {
+        DWORD code = 0;
+        DWORD code_size = sizeof(code);
+        if (!HttpQueryInfoW(req, HTTP_QUERY_STATUS_CODE | HTTP_QUERY_FLAG_NUMBER, &code, &code_size, nullptr)) {
+            error = GetLastError();
+        }
+        else {
+            status = code;
+
+            if (is_retryable_status(code)) {
+                wchar_t value[64] = L"Retry-After";
+                DWORD value_size = sizeof(value);
+                if (HttpQueryInfoW(req, HTTP_QUERY_CUSTOM, value, &value_size, nullptr))
+                    retry_after = parse_retry_after(value);
+            }
+
+            if (code == 200) {
+                ok = true;
+                for (;;) {
+                    char chunk[16384];
+                    DWORD received = 0;
+                    if (!InternetReadFile(req, chunk, static_cast<DWORD>(sizeof(chunk)), &received)) {
+                        error = GetLastError();
+                        ok = false;
+                        break;
+                    }
+                    if (received == 0)
+                        break;
+                    if (response.size() + received > kMaxResponse) {
+                        error = ERROR_FILE_TOO_LARGE;
+                        ok = false;
+                        break;
+                    }
+                    response.append(chunk, received);
+                }
+                if (!ok)
+                    response.clear();
+            }
+        }
+    }
+
+    if (req) InternetCloseHandle(req);
+    if (conn) InternetCloseHandle(conn);
+    InternetCloseHandle(net);
+
+    MBDB_LOG(
+        "wininet: %s (status %lu, %lu bytes, retry-after %d, error %lu)",
+        ok ? "ok" : "FAILED",
+        status,
+        static_cast<unsigned long>(response.size()),
+        retry_after,
+        error);
+
+    return ok;
+}
+
+// The last bytes of a body, printable (see response_prefix).
+static std::string response_suffix(const std::string& body) {
+    const size_t n = (std::min)(body.size(), static_cast<size_t>(80));
+    return response_prefix(body.substr(body.size() - n));
+}
+
+// Under Wine the body has been seen to arrive with the right size but starting in the middle
+// of the JSON, as if the data had been rotated. If moving the front part to the back turns it
+// into valid JSON, do that. Returns the offset the body was rotated by, or 0 if no rotation
+// gives valid JSON (the body is then left untouched).
+static size_t repair_rotated_json(std::string& body) {
+    for (size_t i = 1; i + 1 < body.size(); ++i) {
+        if (body[i] != '{' || body[i + 1] != '"') continue;
+        std::string candidate = body.substr(i);
+        candidate.append(body, 0, i);
+        if (json::accept(candidate)) {
+            body = std::move(candidate);
+            return i;
+        }
+    }
+    return 0;
+}
+
 static bool http_request_impl(
     const std::wstring& path,
     std::string& response,
@@ -432,6 +626,9 @@ static bool http_request_impl(
     MBDB_LOG(
         "http GET https://musicbrainz.org%ls",
         path.c_str());
+
+    if (g_use_wininet.load())
+        return wininet_request(path, response, status, retry_after);
 
     HINTERNET session = get_http_session();
 
@@ -538,25 +735,30 @@ static bool http_request_impl(
 
                     ok = true;
 
-                    // Read response body.
+                    // Read response body. WinHttpReadData is called directly with a fixed
+                    // buffer, without WinHttpQueryDataAvailable first: under Wine the
+                    // query-then-read pattern delivered bodies with their beginning missing.
                     for (;;) {
 
-                        DWORD available = 0;
+                        char chunk[16384];
+                        DWORD received = 0;
 
-                        if (!WinHttpQueryDataAvailable(
+                        if (!WinHttpReadData(
                             req,
-                            &available)) {
+                            chunk,
+                            static_cast<DWORD>(sizeof(chunk)),
+                            &received)) {
 
                             error = GetLastError();
                             ok = false;
                             break;
                         }
 
-                        if (available == 0)
+                        if (received == 0)
                             break;
 
                         // Protect against excessively large responses.
-                        if (available > kMaxResponse -
+                        if (received > kMaxResponse -
                             (std::min)(response.size(), kMaxResponse)) {
 
                             MBDB_LOG(
@@ -568,33 +770,122 @@ static bool http_request_impl(
                             break;
                         }
 
-                        std::string buffer(
-                            static_cast<size_t>(available),
-                            '\0');
-
-                        DWORD received = 0;
-
-                        if (!WinHttpReadData(
-                            req,
-                            buffer.data(),
-                            available,
-                            &received)) {
-
-                            error = GetLastError();
-                            ok = false;
-                            break;
-                        }
-
-                        if (received == 0)
-                            break;
-
-                        response.append(
-                            buffer.data(),
-                            received);
+                        response.append(chunk, received);
                     }
 
                     if (!ok)
                         response.clear();
+                    else {
+                        normalize_response_body(response);
+
+                        // Cross-check the body against the headers, and make sure it looks
+                        // like JSON, so a damaged body is reported here with its headers
+                        // instead of as an unexplained parse error later.
+                        DWORD declared = 0;
+                        DWORD declared_size = sizeof(declared);
+                        const bool has_length = WinHttpQueryHeaders(
+                            req,
+                            WINHTTP_QUERY_CONTENT_LENGTH | WINHTTP_QUERY_FLAG_NUMBER,
+                            WINHTTP_HEADER_NAME_BY_INDEX,
+                            &declared,
+                            &declared_size,
+                            WINHTTP_NO_HEADER_INDEX) != FALSE;
+
+                        size_t first = 0;
+                        while (first < response.size() &&
+                            std::isspace(static_cast<unsigned char>(response[first])))
+                            ++first;
+                        bool json_start = first < response.size() &&
+                            (response[first] == '{' || response[first] == '[');
+
+                        const bool length_mismatch =
+                            has_length && declared != response.size();
+
+                        if (!length_mismatch && !response.empty() && !json_start) {
+                            const std::string before = response_prefix(response);
+                            const size_t offset = repair_rotated_json(response);
+                            if (offset > 0) {
+                                MBDB_LOG(
+                                    "http: response body (%lu bytes, Content-Length matched) "
+                                    "started mid-JSON (\"%s\"); repaired by rotating it at offset %zu",
+                                    static_cast<unsigned long>(response.size()),
+                                    before.c_str(),
+                                    offset);
+                                json_start = true;
+                            }
+                        }
+
+                        if (length_mismatch || (!response.empty() && !json_start)) {
+
+                            DWORD hdr_bytes = 0;
+                            WinHttpQueryHeaders(
+                                req,
+                                WINHTTP_QUERY_RAW_HEADERS_CRLF,
+                                WINHTTP_HEADER_NAME_BY_INDEX,
+                                WINHTTP_NO_OUTPUT_BUFFER,
+                                &hdr_bytes,
+                                WINHTTP_NO_HEADER_INDEX);
+
+                            std::wstring headers(hdr_bytes / sizeof(wchar_t) + 1, L'\0');
+                            if (hdr_bytes > 0 && WinHttpQueryHeaders(
+                                req,
+                                WINHTTP_QUERY_RAW_HEADERS_CRLF,
+                                WINHTTP_HEADER_NAME_BY_INDEX,
+                                headers.data(),
+                                &hdr_bytes,
+                                WINHTTP_NO_HEADER_INDEX)) {
+                                headers.resize(hdr_bytes / sizeof(wchar_t));
+                            }
+                            else {
+                                headers.clear();
+                            }
+                            for (auto& c : headers)
+                                if (c == L'\r' || c == L'\n') c = L'|';
+                            if (headers.size() > 700) headers.resize(700);
+
+                            MBDB_LOG(
+                                "http: damaged response body: %lu bytes received, "
+                                "Content-Length %s%lu, starts with \"%s\", ends with \"%s\"; headers: %ls",
+                                static_cast<unsigned long>(response.size()),
+                                has_length ? "" : "(none) ",
+                                static_cast<unsigned long>(has_length ? declared : 0),
+                                response_prefix(response).c_str(),
+                                response_suffix(response).c_str(),
+                                headers.c_str());
+
+                            // Fetch it again through WinINet (after a short pause, to stay
+                            // within the MusicBrainz rate limit).
+                            error = ERROR_INVALID_DATA;
+                            ok = false;
+                            response.clear();
+
+                            Sleep(1000);
+                            std::string alt;
+                            DWORD alt_status = 0;
+                            int alt_retry = 0;
+                            if (wininet_request(path, alt, alt_status, alt_retry) && alt_status == 200) {
+                                size_t alt_first = 0;
+                                while (alt_first < alt.size() &&
+                                    std::isspace(static_cast<unsigned char>(alt[alt_first])))
+                                    ++alt_first;
+                                if (alt_first < alt.size() && (alt[alt_first] == '{' || alt[alt_first] == '[')) {
+                                    response = std::move(alt);
+                                    status = 200;
+                                    error = ERROR_SUCCESS;
+                                    ok = true;
+                                    g_use_wininet.store(true);
+                                    MBDB_LOG(
+                                        "http: WinINet delivered a sane body (%lu bytes); "
+                                        "WinINet is used for the remaining requests",
+                                        static_cast<unsigned long>(response.size()));
+                                }
+                                else {
+                                    MBDB_LOG("http: WinINet also delivered a damaged body (starts: \"%s\")",
+                                        response_prefix(alt).c_str());
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -916,8 +1207,9 @@ bool musicbrainz_client::search_artist_title(
     catch (const std::exception& e) {
 
         MBDB_LOG(
-            "client: recording search JSON error: %s",
-            e.what());
+            "client: recording search JSON error: %s (response starts: \"%s\")",
+            e.what(),
+            response_prefix(response).c_str());
 
         return false;
     }
@@ -1025,8 +1317,9 @@ bool musicbrainz_client::search_artist_name(
     catch (const std::exception& e) {
 
         MBDB_LOG(
-            "client: artist search JSON error: %s",
-            e.what());
+            "client: artist search JSON error: %s (response starts: \"%s\")",
+            e.what(),
+            response_prefix(response).c_str());
 
         return false;
     }
@@ -1118,8 +1411,9 @@ bool musicbrainz_client::get_artist(
     catch (const std::exception& e) {
 
         MBDB_LOG(
-            "client: artist JSON error: %s",
-            e.what());
+            "client: artist JSON error: %s (response starts: \"%s\")",
+            e.what(),
+            response_prefix(response).c_str());
 
         return false;
     }

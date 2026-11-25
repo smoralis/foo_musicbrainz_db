@@ -13,9 +13,12 @@
 #include <vector>
 #include <utility>
 #include <cwctype>
+#include <cstdlib>
 #include <cstring>
 
 #include <richedit.h>
+#include <commctrl.h>
+#pragma comment(lib, "comctl32.lib")
 #include <shellapi.h>
 
 #include "artist_info_window.h"
@@ -724,8 +727,183 @@ namespace {
         return t;
     }
 
+    // ---- Hyperlinks --------------------------------------------------------------------
+    // Wine's rich edit control draws CFE_LINK text in its own dark blue whatever colour is
+    // set, and does not send EN_LINK for it. Hyperlinks are therefore drawn as ordinary
+    // coloured, underlined text (so the theme / highlight colour is used), and clicks on them
+    // are detected here and reported to the parent as the same EN_LINK notification the rest
+    // of the code already handles.
+
+    // Hyperlinks are always drawn and handled by the component itself (see above) instead of
+    // relying on the control's own link support. The earlier idea of doing this only when
+    // Wine is detected did not take effect reliably, and the result looks the same on Windows.
+    bool use_custom_links() {
+        return true;
+    }
+
+    struct link_span { LONG start; LONG end; };
+    std::map<HWND, std::vector<link_span>> g_wine_links; // UI thread only; per Rich Edit
+
+    bool wine_link_at(HWND edit, POINT pt, CHARRANGE& out) {
+        const auto it = g_wine_links.find(edit);
+        if (it == g_wine_links.end()) return false;
+        POINTL p = { pt.x, pt.y };
+        const LONG index = static_cast<LONG>(::SendMessageW(edit, EM_CHARFROMPOS, 0, reinterpret_cast<LPARAM>(&p)));
+        for (const auto& span : it->second) {
+            if (index >= span.start && index < span.end) {
+                out.cpMin = span.start;
+                out.cpMax = span.end;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    std::wstring get_link_target(LPNMHDR hdr); // defined further down
+
+    // Sends the EN_LINK notification the parent window handles for a click on a link.
+    void notify_link(HWND edit, const CHARRANGE& range, WPARAM wp, LPARAM lp) {
+        ENLINK link{};
+        link.nmhdr.hwndFrom = edit;
+        link.nmhdr.idFrom = static_cast<UINT_PTR>(::GetDlgCtrlID(edit));
+        link.nmhdr.code = EN_LINK;
+        link.msg = WM_LBUTTONUP;
+        link.wParam = wp;
+        link.lParam = lp;
+        link.chrg = range;
+        ::SendMessageW(::GetParent(edit), WM_NOTIFY, link.nmhdr.idFrom, reinterpret_cast<LPARAM>(&link));
+    }
+
+    void put_text_on_clipboard(HWND owner, const std::wstring& text) {
+        if (text.empty() || !::OpenClipboard(owner)) return;
+        ::EmptyClipboard();
+        const size_t bytes = (text.size() + 1) * sizeof(wchar_t);
+        if (HGLOBAL mem = ::GlobalAlloc(GMEM_MOVEABLE, bytes)) {
+            if (void* ptr = ::GlobalLock(mem)) {
+                std::memcpy(ptr, text.c_str(), bytes);
+                ::GlobalUnlock(mem);
+                if (!::SetClipboardData(CF_UNICODETEXT, mem)) ::GlobalFree(mem);
+            } else {
+                ::GlobalFree(mem);
+            }
+        }
+        ::CloseClipboard();
+    }
+
+    // Right-click menu of the artist text: link actions when over a link, then Copy / Select all.
+    void show_text_context_menu(HWND edit, LPARAM lp) {
+        POINT screen = { static_cast<short>(LOWORD(lp)), static_cast<short>(HIWORD(lp)) };
+        CHARRANGE link_range{};
+        bool on_link = false;
+        if (screen.x == -1 && screen.y == -1) { // opened from the keyboard
+            RECT rc = {};
+            ::GetWindowRect(edit, &rc);
+            screen = { rc.left + 8, rc.top + 8 };
+        } else {
+            POINT client = screen;
+            ::ScreenToClient(edit, &client);
+            on_link = wine_link_at(edit, client, link_range);
+        }
+
+        CHARRANGE selection{};
+        ::SendMessageW(edit, EM_EXGETSEL, 0, reinterpret_cast<LPARAM>(&selection));
+        const bool has_selection = selection.cpMax > selection.cpMin;
+
+        HMENU menu = ::CreatePopupMenu();
+        if (on_link) {
+            ::AppendMenuW(menu, MF_STRING, 1, L"Open link");
+            ::AppendMenuW(menu, MF_STRING, 2, L"Copy link address");
+            ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+        }
+        ::AppendMenuW(menu, MF_STRING | (has_selection ? 0 : MF_GRAYED), 3, L"Copy");
+        ::AppendMenuW(menu, MF_STRING, 4, L"Select all");
+        const int cmd = ::TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, screen.x, screen.y, 0, edit, nullptr);
+        ::DestroyMenu(menu);
+
+        switch (cmd) {
+        case 1:
+            notify_link(edit, link_range, 0, 0);
+            break;
+        case 2: {
+            ENLINK link{};
+            link.nmhdr.hwndFrom = edit;
+            link.msg = WM_LBUTTONUP;
+            link.chrg = link_range;
+            put_text_on_clipboard(edit, get_link_target(&link.nmhdr));
+            break;
+        }
+        case 3:
+            ::SendMessageW(edit, WM_COPY, 0, 0);
+            break;
+        case 4: {
+            CHARRANGE all = { 0, -1 };
+            ::SendMessageW(edit, EM_EXSETSEL, 0, reinterpret_cast<LPARAM>(&all));
+            break;
+        }
+        default:
+            break;
+        }
+    }
+
+    LRESULT CALLBACK wine_link_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR id, DWORD_PTR) {
+        switch (msg) {
+        case WM_SETCURSOR: {
+            POINT pt = {};
+            ::GetCursorPos(&pt);
+            ::ScreenToClient(wnd, &pt);
+            CHARRANGE range{};
+            if (wine_link_at(wnd, pt, range)) {
+                ::SetCursor(::LoadCursorW(nullptr, IDC_HAND));
+                return TRUE;
+            }
+            break;
+        }
+        case WM_LBUTTONUP: {
+            const POINT pt = { static_cast<short>(LOWORD(lp)), static_cast<short>(HIWORD(lp)) };
+            CHARRANGE range{};
+            const LRESULT result = ::DefSubclassProc(wnd, msg, wp, lp);
+            CHARRANGE selection{};
+            ::SendMessageW(wnd, EM_EXGETSEL, 0, reinterpret_cast<LPARAM>(&selection));
+            // A plain click, not the end of a text selection drag.
+            if (selection.cpMin == selection.cpMax && wine_link_at(wnd, pt, range))
+                notify_link(wnd, range, wp, lp);
+            return result;
+        }
+        case WM_CONTEXTMENU:
+            show_text_context_menu(wnd, lp);
+            return 0;
+        case WM_NCDESTROY:
+            g_wine_links.erase(wnd);
+            ::RemoveWindowSubclass(wnd, wine_link_proc, id);
+            break;
+        }
+        return ::DefSubclassProc(wnd, msg, wp, lp);
+    }
+
+    void install_wine_link_support(HWND edit) {
+        if (use_custom_links() && edit)
+            ::SetWindowSubclass(edit, wine_link_proc, 1, 0);
+    }
+
+    // Hyperlink colour that stays readable on `background`: when the wanted colour is too close
+    // to the background in brightness (a dark blue link on a dark background), it is moved
+    // towards white (dark background) or black (light background) until it stands out.
+    COLORREF readable_link_colour(COLORREF link, COLORREF background) {
+        auto luma = [](COLORREF c) { return (GetRValue(c) * 299 + GetGValue(c) * 587 + GetBValue(c) * 114) / 1000; };
+        const bool dark_background = luma(background) < 128;
+        const int target = dark_background ? 0xFF : 0x00;
+        for (int i = 0; i < 12 && std::abs(luma(link) - luma(background)) < 120; ++i) {
+            link = RGB(GetRValue(link) + (target - static_cast<int>(GetRValue(link))) / 4,
+                       GetGValue(link) + (target - static_cast<int>(GetGValue(link))) / 4,
+                       GetBValue(link) + (target - static_cast<int>(GetBValue(link))) / 4);
+        }
+        return link;
+    }
+
     void format_document(HWND edit, const rich_document& doc, const info_theme& t) {
         const LONG text_length = static_cast<LONG>(doc.text.length());
+        const COLORREF link_colour = readable_link_colour(t.link, t.background);
+        if (use_custom_links()) g_wine_links[edit].clear();
         if (text_length <= 0) return;
 
         // Base format for the whole document first.
@@ -765,9 +943,16 @@ namespace {
                 break;
 
             case format_kind::hyperlink:
-                cf.dwMask = CFM_UNDERLINE | CFM_COLOR | CFM_LINK;
-                cf.dwEffects = CFE_UNDERLINE | CFE_LINK;
-                cf.crTextColor = t.link;
+                if (use_custom_links()) {
+                    // Formatted in a second pass below, after everything else.
+                    g_wine_links[edit].push_back({ r.start, r.end });
+                    continue;
+                }
+                else {
+                    cf.dwMask = CFM_UNDERLINE | CFM_COLOR | CFM_LINK;
+                    cf.dwEffects = CFE_UNDERLINE | CFE_LINK;
+                }
+                cf.crTextColor = link_colour;
                 break;
 
             case format_kind::json_key:
@@ -793,6 +978,20 @@ namespace {
 
             set_rich_selection(edit, r.start, r.end);
             ::SendMessageW(edit, EM_SETCHARFORMAT, SCF_SELECTION, reinterpret_cast<LPARAM>(&cf));
+        }
+
+        // Hyperlinks last. CFM_LINK is in the mask but CFE_LINK is not set, which
+        // also clears any link attribute Wine's own URL detection may have put on the text.
+        if (use_custom_links()) {
+            CHARFORMAT2W cf{};
+            cf.cbSize = sizeof(cf);
+            cf.dwMask = CFM_UNDERLINE | CFM_COLOR | CFM_LINK;
+            cf.dwEffects = CFE_UNDERLINE;
+            cf.crTextColor = link_colour;
+            for (const auto& span : g_wine_links[edit]) {
+                set_rich_selection(edit, span.start, span.end);
+                ::SendMessageW(edit, EM_SETCHARFORMAT, SCF_SELECTION, reinterpret_cast<LPARAM>(&cf));
+            }
         }
 
         set_rich_selection(edit, 0, 0);
@@ -1110,6 +1309,7 @@ namespace {
                 0,
                 ::SendMessage(edit, EM_GETEVENTMASK, 0, 0) | ENM_LINK
             );
+            install_wine_link_support(edit);
 
             update_theme();
 
@@ -1422,16 +1622,18 @@ HWND mbdb_info_create_richedit(HWND parent) {
     if (edit) {
         ::SendMessage(edit, EM_SETLIMITTEXT, 0x7FFFFFFE, 0);
         ::SendMessage(edit, EM_SETEVENTMASK, 0, ::SendMessage(edit, EM_GETEVENTMASK, 0, 0) | ENM_LINK);
+        install_wine_link_support(edit);
     }
 
     return edit;
 }
 
-static void render_in_panel(HWND edit, const rich_document& doc, bool dark, COLORREF background, COLORREF text, HFONT font) {
+static void render_in_panel(HWND edit, const rich_document& doc, bool dark, COLORREF background, COLORREF text, HFONT font, COLORREF link) {
     info_theme t = make_theme(dark);
     if (font) t.font = describe_font(font); // the panel's own (host-defined) font
     if (background != CLR_INVALID) t.background = background; // follow the panel's own colours
     if (text != CLR_INVALID) t.text = text;
+    if (link != CLR_INVALID) t.link = link; // the host's highlight colour
 
     apply_rich_edit_scrollbar_theme(edit, dark);
     set_document(edit, doc, t);
@@ -1448,7 +1650,7 @@ bool mbdb_info_has_raw(const mbdb_info_content& content) {
 }
 
 void mbdb_info_render(HWND edit, const mbdb_info_content& content, bool show_raw,
-                      bool dark, COLORREF background, COLORREF text, HFONT font) {
+                      bool dark, COLORREF background, COLORREF text, HFONT font, COLORREF link) {
     if (!edit || !::IsWindow(edit)) return;
 
     rich_document doc = content.content.main;
@@ -1457,16 +1659,16 @@ void mbdb_info_render(HWND edit, const mbdb_info_content& content, bool show_raw
         doc.merge(content.content.raw);
     }
 
-    render_in_panel(edit, doc, dark, background, text, font);
+    render_in_panel(edit, doc, dark, background, text, font, link);
 }
 
 void mbdb_info_render_message(HWND edit, const std::string& message, bool dark,
-                              COLORREF background, COLORREF text, HFONT font) {
+                              COLORREF background, COLORREF text, HFONT font, COLORREF link) {
     if (!edit || !::IsWindow(edit)) return;
 
     rich_document doc;
     doc.append(message);
-    render_in_panel(edit, doc, dark, background, text, font);
+    render_in_panel(edit, doc, dark, background, text, font, link);
 }
 
 std::wstring mbdb_info_get_link(LPNMHDR hdr) {

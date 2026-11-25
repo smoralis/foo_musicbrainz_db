@@ -48,6 +48,9 @@ public:
     // True while the host is in layout edit mode (Default UI). In that mode the
     // panel must not take mouse input so the host can select and move it.
     virtual bool is_edit_mode() { return false; }
+    // The host's highlight colour (Default UI: the "highlight" colour of the colour scheme),
+    // used for hyperlinks. Return false when the host has none; a built-in colour is used.
+    virtual bool query_highlight_colour(COLORREF& highlight) { (void)highlight; return false; }
 };
 
 // Owner-drawn panel showing database statistics and a live event feed. Used by
@@ -65,6 +68,7 @@ public:
     void refresh_theme(); // call when the host reports colour/font changes
     void on_edit_mode_changed(); // call when the host's layout edit mode is toggled
     void show_now_playing_only(); // standalone "Now playing" panel: only that view, no title/tabs
+    void show_selected_only();    // standalone "Selected Artist" panel: only that view, no title/tabs
 
     BEGIN_MSG_MAP(activity_window)
         MESSAGE_HANDLER(WM_CREATE, OnCreate)
@@ -141,6 +145,13 @@ private:
     // Now-playing tab (activity_nowplaying.cpp)
     void paint_nowplaying(HDC dc, const RECT& rc, int x, int right, int& y, int line_h, int gap, int pad, int dpi);
     bool poll_nowplaying();
+    bool picker_mouse_down(POINT pt);            // click in the compact artist list of the Selected Artist tab
+    void adopt_table_focus();                    // pick the Artists table's focused artist when it changed
+    bool poll_selected_artist();                 // "Selected Artist" tab: follows the Artists table's focused row
+    void start_np_fetch(const std::string& mbid); // loads and formats an artist record off the UI thread
+    void reset_info_source();                    // the Now playing / Selected Artist view switched its data source
+    bool picker_shown() const; // Selected Artist tab with its search box + artist list visible
+    bool np_view() const { return m_view == 2 || m_view == 3; } // views that show the artist text + browser
     void render_nowplaying();
     void create_info();
     void position_info(const RECT& r);
@@ -172,6 +183,7 @@ private:
 
     activity_host* m_host = nullptr;
     COLORREF m_bg = CLR_INVALID, m_fg = CLR_INVALID;
+    COLORREF m_link = CLR_INVALID;          // hyperlink colour from the host, CLR_INVALID = built-in
     COLORREF m_dim = 0, m_accent = 0, m_good = 0, m_warn = 0, m_error = 0;
     bool m_dark = false;
     HFONT m_font = nullptr;  // not owned
@@ -187,7 +199,8 @@ private:
     // 6 = Download similar artists (similar pane of the artists tab).
     // 7 = Download similar artists of the selected rows (artists toolbar).
     // 8 = Auto-open MusicBrainz page toggle (Now playing tab).
-    RECT m_btn[9] = {};
+    // 9 = Show/hide artist list toggle (Selected Artist tab).
+    RECT m_btn[10] = {};
     int m_hot = -1, m_down = -1;
     RECT m_sb_track = {}, m_sb_thumb = {};   // empty when the list fits
     size_t m_sb_total = 0, m_sb_visible = 0;
@@ -211,7 +224,14 @@ private:
 		
     // Artists tab
     bool m_np_only = false;                 // standalone Now playing panel
-    int m_view = 0;                         // 0 = activity, 1 = artists
+    int m_view = 0;                         // 0 = activity, 1 = artists, 2 = now playing, 3 = selected item
+    std::string m_sel_mbid;                 // artist currently loaded into the Selected Artist view
+    std::string m_pick_mbid;                // artist chosen in the Selected Artist tab's compact list
+    std::string m_pick_last_focus;          // table focus last adopted (so a pick is not overwritten)
+    RECT m_pick_rc = {};                    // the compact list (empty when not shown)
+    size_t m_pscroll = 0, m_pmax_scroll = 0, m_pvisible = 0;
+    int m_prow_h = 0;
+    bool m_pick_reveal = false;             // scroll the compact list to the picked artist when drawn
     std::vector<artist_list_item> m_rows;
     std::vector<char> m_sel;                // indexed by row id
     std::vector<size_t> m_order;            // display position -> row id
@@ -229,7 +249,7 @@ private:
     int m_sort_col = 0;                     // 0 name, 1 country, 2 mbid
     bool m_sort_asc = true;
     long long m_focus = -1, m_anchor = -1;  // display positions
-    RECT m_tab[3] = {}, m_header_rc = {}, m_list_rc = {}, m_similar_rc = {};
+    RECT m_tab[4] = {}, m_header_rc = {}, m_list_rc = {}, m_similar_rc = {};
     std::shared_ptr<activity_similar_artists_state> m_similar_fetch;
     std::string m_similar_requested_mbid, m_similar_error;
     std::vector<listenbrainz_similar_artist> m_similar_rows;

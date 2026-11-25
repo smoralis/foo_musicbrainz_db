@@ -103,6 +103,7 @@
     <ClCompile Include="src\json_exporter.cpp" />
     <ClCompile Include="src\musicbrainz_client.cpp" />
     <ClCompile Include="src\listenbrainz_similar_artists.cpp" />
+    <ClCompile Include="src\wininet_http.cpp" />
     <ClCompile Include="src\provider.cpp" />
     <ClCompile Include="src\activity.cpp" />
     <ClCompile Include="src\activity_window.cpp" />
@@ -120,6 +121,7 @@
   <ItemGroup>
     <ClInclude Include="src\preferences.h" />
     <ClInclude Include="include\listenbrainz_similar_artists.h" />
+    <ClInclude Include="src\wininet_http.h" />
     <ClInclude Include="src\artist_info_window.h" />
     <ClInclude Include="src\resource.h" />
 	<ClInclude Include="src\activity_webview.h" />

@@ -1,12 +1,15 @@
 
 #include "stdafx.h"
 #include "../include/listenbrainz_similar_artists.h"
+#include "debug_log.h"
+#include "wininet_http.h"
 
 #include <windows.h>
 #include <winhttp.h>
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cctype>
 #include <cstring>
@@ -77,11 +80,11 @@ namespace {
         return out;
     }
 
-    bool http_get(
+    bool http_get_winhttp(
         const std::wstring& url,
         std::string& body,
         std::string& error,
-        DWORD timeout_ms = 0)
+        DWORD timeout_ms)
     {
         URL_COMPONENTS parts{};
         parts.dwStructSize = sizeof(parts);
@@ -237,6 +240,94 @@ namespace {
         WinHttpCloseHandle(session);
 
         return ok;
+    }
+
+    // ---------------------------------------------------------------------------------
+    // WinINet fallback (see wininet_http.cpp). Under Wine the WinHTTP stack can deliver a body with the right
+    // size but starting in the middle of the data (the JSON parser then fails at "m"
+    // or similar). WinINet is a separate implementation, so a damaged response is
+    // fetched again through it, and it is then used for the rest of the session.
+    // ---------------------------------------------------------------------------------
+    std::atomic<bool> g_use_wininet{ false };
+
+    bool looks_like_json(const std::string& body) {
+        size_t i = 0;
+
+        // Skip a UTF-8 BOM and leading whitespace.
+        if (body.size() >= 3 &&
+            static_cast<unsigned char>(body[0]) == 0xEF &&
+            static_cast<unsigned char>(body[1]) == 0xBB &&
+            static_cast<unsigned char>(body[2]) == 0xBF) {
+            i = 3;
+        }
+
+        while (i < body.size() &&
+            std::isspace(static_cast<unsigned char>(body[i]))) {
+            ++i;
+        }
+
+        return i < body.size() && (body[i] == '[' || body[i] == '{');
+    }
+
+    std::string printable_prefix(const std::string& body) {
+        std::string out;
+
+        const size_t n = (std::min)(body.size(), static_cast<size_t>(40));
+
+        for (size_t i = 0; i < n; ++i) {
+            const unsigned char c = static_cast<unsigned char>(body[i]);
+            out.push_back((c >= 0x20 && c < 0x7F && c != '"') ? static_cast<char>(c) : '.');
+        }
+
+        return out;
+    }
+
+    // WinHTTP first; if the body is damaged (expect_json and it does not start
+    // like JSON), fetch it again through WinINet.
+    bool http_get(
+        const std::wstring& url,
+        std::string& body,
+        std::string& error,
+        DWORD timeout_ms = 0,
+        bool expect_json = true)
+    {
+        if (g_use_wininet.load())
+            return wininet_http_get(url, body, error, timeout_ms);
+
+        body.clear();
+
+        if (!http_get_winhttp(url, body, error, timeout_ms))
+            return false;
+
+        if (!expect_json || looks_like_json(body))
+            return true;
+
+        MBDB_LOG(
+            "ListenBrainz: damaged response body (%lu bytes, starts with \"%s\"); retrying through WinINet",
+            static_cast<unsigned long>(body.size()),
+            printable_prefix(body).c_str());
+
+        std::string alt;
+        std::string alt_error;
+
+        if (wininet_http_get(url, alt, alt_error, timeout_ms) &&
+            looks_like_json(alt)) {
+
+            body = std::move(alt);
+            g_use_wininet.store(true);
+
+            MBDB_LOG("ListenBrainz: WinINet delivered a sane body; WinINet is used for the remaining requests");
+
+            return true;
+        }
+
+        body.clear();
+
+        error = alt_error.empty()
+            ? "ListenBrainz returned a damaged response"
+            : alt_error;
+
+        return false;
     }
 
     std::filesystem::path persistent_cache_path(
@@ -415,7 +506,8 @@ bool listenbrainz_fetch_available_algorithms(
         L"https://labs.api.listenbrainz.org/similar-artists",
         body,
         error,
-        5000)) {
+        5000,
+        false)) {
 
         if (error_out)
             *error_out = error;

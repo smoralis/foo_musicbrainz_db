@@ -5,6 +5,7 @@
 #include "preferences.h"
 #include <windowsx.h>
 #include <algorithm>
+#include <cstdlib>
 #include <filesystem>
 #include <vector>
 
@@ -94,6 +95,15 @@ bool activity_window::update_theme() {
     if (!font) font = mbdb_ui_default_font(); // e.g. Columns UI: the font its settings define
     if (!font) font = static_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
 
+    // Hyperlinks use the host's highlight colour, but only when it stands out from the
+    // background (a dim highlight on a dark background would be unreadable).
+    COLORREF link = CLR_INVALID, highlight = 0;
+    if (m_host && m_host->query_highlight_colour(highlight)) {
+        auto luma = [](COLORREF c) { return (GetRValue(c) * 299 + GetGValue(c) * 587 + GetBValue(c) * 114) / 1000; };
+        if (std::abs(luma(highlight) - luma(bg)) >= 90) link = highlight;
+    }
+    if (link != m_link) { m_link = link; m_np_dirty = true; }
+
     const bool changed = bg != m_bg || fg != m_fg || font != m_font;
     // Marked here (not only in the timer): refresh_theme(), called when the host notifies a
     // colour or font change, consumes the change, so the timer would never see it. The Now
@@ -173,8 +183,8 @@ LRESULT activity_window::OnTimer(UINT, WPARAM wp, LPARAM, BOOL& handled) {
     if (poll_reload()) dirty = true;
     if (poll_similar_artists()) dirty = true;
     if (poll_nowplaying()) dirty = true;
-    if (m_view == 2 && m_np_dirty) { render_nowplaying(); m_np_dirty = false; dirty = true; }
-    if (m_view == 1 && !m_reload && m_rows_revision != mbdb_activity::db_revision()) reload_artists();
+    if (np_view() && m_np_dirty) { render_nowplaying(); m_np_dirty = false; dirty = true; }
+    if ((m_view == 1 || m_view == 3) && !m_reload && (!m_rows_loaded || m_rows_revision != mbdb_activity::db_revision())) reload_artists();
     if (mbdb_activity::working()) dirty = true; // animates the "Working..." dots
     if (mbdb_activity::searching()) dirty = true; // animates the "Searching..." dots
     if (mbdb_activity::batch_visible() || m_batch_was_visible) dirty = true; // progress bar + its hide timer
@@ -196,6 +206,18 @@ LRESULT activity_window::OnMouseWheel(UINT, WPARAM wp, LPARAM, BOOL&) {
     if (steps != 0) {
         m_wheel -= steps * WHEEL_DELTA;
         if (m_view == 1) { artists_wheel(steps); return 0; }
+        if (m_view == 3) { // only the compact artist list scrolls; the text and browser are child windows
+            POINT cursor;
+            GetCursorPos(&cursor);
+            ScreenToClient(&cursor);
+            if (PtInRect(&m_pick_rc, cursor)) {
+                long long target = static_cast<long long>(m_pscroll) - static_cast<long long>(steps) * 3;
+                target = (std::max)(0LL, (std::min)(target, static_cast<long long>(m_pmax_scroll)));
+                m_pscroll = static_cast<size_t>(target);
+                Invalidate(FALSE);
+            }
+            return 0;
+        }
         // Newest events are at the top: wheel up = towards newer.
         long long target = static_cast<long long>(m_scroll) - static_cast<long long>(steps) * 3;
         target = (std::max)(0LL, (std::min)(target, static_cast<long long>(m_max_scroll)));
@@ -208,7 +230,7 @@ LRESULT activity_window::OnMouseWheel(UINT, WPARAM wp, LPARAM, BOOL&) {
 // ---------------------------------------------------------------- buttons --
 
 int activity_window::hit_test(POINT pt) const {
-    for (int i = 0; i < 9; ++i) if (PtInRect(&m_btn[i], pt)) return i;
+    for (int i = 0; i < 10; ++i) if (PtInRect(&m_btn[i], pt)) return i;
     return -1;
 }
 
@@ -217,10 +239,11 @@ bool activity_window::button_enabled(int index) const {
     case 1: return mbdb_activity::stats().queued > 0; // "Cancel" needs something queued
     case 2: return m_view == 1 && selected_count() > 0;
     case 3: return m_view == 1 && !m_rows.empty();
-    case 8: return m_view == 2 && !mbdb_prefs::embedded_browser_disabled();
+    case 9: return m_view == 3;
+    case 8: return np_view() && !mbdb_prefs::embedded_browser_disabled();
     case 7: return m_view == 1 && selected_count() > 0;
     case 6: return m_view == 1 && !m_similar_loading && !similar_missing_mbids().empty();
-    case 5: return m_view == 2 && m_np_has_record && m_np_content && mbdb_info_has_raw(*m_np_content);
+    case 5: return np_view() && m_np_has_record && m_np_content && mbdb_info_has_raw(*m_np_content);
     default: return true;
     }
 }
@@ -233,6 +256,7 @@ void activity_window::activate_button(int index) {
     else if (index == 4) reload_artists();
     else if (index == 6) download_similar_artists();
     else if (index == 7) download_similar_of_selected();
+    else if (index == 9) { mbdb_prefs::set_show_artist_picker(!mbdb_prefs::show_artist_picker()); m_pick_reveal = true; }
     else if (index == 8) { mbdb_prefs::set_auto_load_artist_page(!mbdb_prefs::auto_load_artist_page()); m_np_dirty = true; }
     else if (index == 5) { m_np_raw = !m_np_raw; m_np_dirty = true; Invalidate(FALSE); }
 }
@@ -283,6 +307,7 @@ LRESULT activity_window::OnLButtonDown(UINT, WPARAM, LPARAM lp, BOOL& handled) {
         Invalidate(FALSE);
         return 0;
     }
+    if (m_view == 3 && picker_mouse_down(pt)) return 0;
     if (artists_mouse_down(pt)) return 0;
     handled = FALSE;
     return 0;
@@ -347,15 +372,15 @@ LRESULT activity_window::OnNcHitTest(UINT, WPARAM, LPARAM, BOOL& handled) {
 void activity_window::on_edit_mode_changed() {
     if (m_search.IsWindow()) {
         const bool editing = m_host && m_host->is_edit_mode();
-        m_search.ShowWindow(editing || m_view != 1 ? SW_HIDE : SW_SHOW);
+        m_search.ShowWindow(editing || (m_view != 1 && !picker_shown()) ? SW_HIDE : SW_SHOW);
     }
     if (m_info.IsWindow()) {
         const bool editing = m_host && m_host->is_edit_mode();
-        m_info.ShowWindow(editing || m_view != 2 ? SW_HIDE : SW_SHOW);
+        m_info.ShowWindow(editing || !np_view() ? SW_HIDE : SW_SHOW);
     }
 	
     const bool editing = m_host && m_host->is_edit_mode();
-	m_webview.show(!editing && m_view == 2 && !mbdb_prefs::embedded_browser_disabled());
+	m_webview.show(!editing && np_view() && !mbdb_prefs::embedded_browser_disabled());
 	
     Invalidate();
 }
@@ -373,7 +398,7 @@ LRESULT activity_window::OnContextMenu(UINT, WPARAM, LPARAM lp, BOOL&) {
         artists_context_menu(pt);
         return 0;
     }
-    if (m_view == 2) return 0; // the Rich Edit has its own menu
+    if (np_view()) return 0; // the Rich Edit has its own menu
     if (pt.x == -1 && pt.y == -1) GetCursorPos(&pt); // keyboard-invoked
     HMENU menu = CreatePopupMenu();
     AppendMenuW(menu, MF_STRING, 1, L"Copy events");
@@ -425,14 +450,21 @@ void activity_window::paint(HDC dc, const RECT& rc) {
     const auto st = mbdb_activity::stats();
     const int x = pad, right = rc.right - pad;
     int y = pad;
-    for (int i = 2; i < 9; ++i) m_btn[i] = RECT(); // only the artists / now playing tabs have these buttons
+    for (int i = 2; i < 10; ++i) m_btn[i] = RECT(); // only the artists / now playing tabs have these buttons
     m_sb_track = RECT(); // set again by draw_scrollbar() when the list is long enough to scroll
     m_sb_thumb = RECT();
+    m_pick_rc = RECT(); // set again by paint_nowplaying() on the Selected Artist tab
 
     if (m_np_only) { // standalone "Now playing" panel: no title row, status line or tabs
         m_btn[0] = RECT();
         m_btn[1] = RECT();
         paint_nowplaying(dc, rc, x, right, y, line_h, gap, pad, dpi);
+        // The search box is only positioned (and shown) while the artist list is; hide it
+        // otherwise. The code below that does this for the tabs is not reached here.
+        if (!picker_shown() && m_search.IsWindow() && m_search.IsWindowVisible()) {
+            m_search.ShowWindow(SW_HIDE);
+            m_search_applied = RECT();
+        }
         SelectObject(dc, old_font);
         return;
     }
@@ -526,19 +558,19 @@ void activity_window::paint(HDC dc, const RECT& rc) {
     }
 
     // The search box belongs to the artists tab, the Rich Edit to the now-playing tab.
-    if (m_view != 1 && m_search.IsWindow() && m_search.IsWindowVisible()) {
+    if (m_view != 1 && !picker_shown() && m_search.IsWindow() && m_search.IsWindowVisible()) {
         m_search.ShowWindow(SW_HIDE);
         m_search_applied = RECT();
     }
-    if (m_view != 2 && m_info.IsWindow() && m_info.IsWindowVisible()) {
+    if (!np_view() && m_info.IsWindow() && m_info.IsWindowVisible()) {
         m_webview.show(false);
 		m_info.ShowWindow(SW_HIDE);
         m_info_applied = RECT();
     }
 
-    // Tabs: Activity | Artists | Now playing
+    // Tabs: Activity | Artists | Now playing | Selected Artist
     paint_tabs(dc, x, right, y, line_h, gap, dpi, st.db_artists);
-    if (m_view == 2) {
+    if (np_view()) {
         paint_nowplaying(dc, rc, x, right, y, line_h, gap, pad, dpi);
         SelectObject(dc, old_font);
         return;
