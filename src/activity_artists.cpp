@@ -13,6 +13,7 @@
 #include <commdlg.h>
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <set>
@@ -51,13 +52,9 @@ std::vector<std::string> activity_window::selected_mbids() const {
 }
 
 void activity_window::rebuild_haystack() {
-    auto lower = [](std::string v) {
-        for (auto& c : v) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-        return v;
-    };
     m_haystack.resize(m_rows.size());
     for (size_t i = 0; i < m_rows.size(); ++i)
-        m_haystack[i] = lower(m_rows[i].name + "\n" + m_rows[i].country + "\n" + m_rows[i].mbid);
+        m_haystack[i] = mbdb_search::make_row(m_rows[i]);
 }
 
 // Applies the filter and the sort order to build the display order.
@@ -65,7 +62,7 @@ void activity_window::sort_artists() {
     m_order.clear();
     std::vector<char> visible(m_rows.size(), 0);
     for (size_t i = 0; i < m_rows.size(); ++i) {
-        if (m_filter.empty() || (i < m_haystack.size() && m_haystack[i].find(m_filter) != std::string::npos)) {
+        if (m_query.empty() || (i < m_haystack.size() && mbdb_search::matches(m_query, m_haystack[i]))) {
             m_order.push_back(i);
             visible[i] = 1;
         }
@@ -78,8 +75,20 @@ void activity_window::sort_artists() {
     std::stable_sort(m_order.begin(), m_order.end(), [&](size_t a, size_t b) {
         const artist_list_item& x = m_rows[a];
         const artist_list_item& y = m_rows[b];
-        const std::string& kx = col == 0 ? x.name : col == 1 ? x.country : x.mbid;
-        const std::string& ky = col == 0 ? y.name : col == 1 ? y.country : y.mbid;
+        auto key = [col](const artist_list_item& a) -> const std::string& {
+            switch (col) {
+            case 0: return a.name;
+            case 1: return a.type;
+            case 2: return a.country;
+            case 3: return a.area;
+            case 4: return a.begin;
+            case 5: return a.end;
+            default: return a.mbid;
+            }
+        };
+        const std::string& kx = key(x);
+        const std::string& ky = key(y);
+        if ((col == 4 || col == 5) && kx.empty() != ky.empty()) return ky.empty(); // no date: last, either way
         if (ci_less(kx, ky)) return asc;
         if (ci_less(ky, kx)) return !asc;
         return ci_less(x.mbid, y.mbid); // stable tie-break
@@ -333,7 +342,20 @@ void activity_window::paint_similar_artists(HDC dc, const RECT& pane, int line_h
     if (m_similar_scroll > m_similar_max_scroll) m_similar_scroll = m_similar_max_scroll;
 
     const size_t count = (std::min)(m_similar_visible_rows, m_similar_rows.size() - (std::min)(m_similar_scroll, m_similar_rows.size()));
-    const int score_w = text_width(dc, L"0.000") + gap;
+    // ListenBrainz scores are often large whole numbers (hundreds of thousands), sometimes
+    // fractions: show whole numbers without decimals, and size the column from the widest score
+    // so it is never cut off with "...".
+    auto format_score = [](double v, wchar_t* out, size_t size) {
+        if (std::fabs(v - std::round(v)) < 1e-9 || std::fabs(v) >= 1000.0) swprintf_s(out, size, L"%.0f", v);
+        else swprintf_s(out, size, L"%.3f", v);
+    };
+    int score_w = text_width(dc, L"0.000") + gap;
+    for (const auto& r : m_similar_rows) {
+        wchar_t text[48] = {};
+        format_score(r.score, text, 48);
+        score_w = (std::max)(score_w, text_width(dc, text) + gap);
+    }
+    score_w = (std::min)(score_w, (std::max)(1, static_cast<int>(rows_right - x) * 2 / 5));
     for (size_t i = 0; i < count; ++i) {
         const size_t index = m_similar_scroll + i;
         const auto& a = m_similar_rows[index];
@@ -345,8 +367,8 @@ void activity_window::paint_similar_artists(HDC dc, const RECT& pane, int line_h
             DeleteObject(selected);
         }
         draw_text(dc, x + gap / 2, ry, rows_right - score_w, line_h, widen(a.name), m_fg);
-        wchar_t score[32] = {};
-        swprintf_s(score, L"%.3f", a.score);
+        wchar_t score[48] = {};
+        format_score(a.score, score, 48);
         draw_text(dc, rows_right - score_w, ry, rows_right, line_h, score, m_dim);
     }
 
@@ -627,7 +649,7 @@ bool activity_window::artists_mouse_down(POINT pt) {
         return true;
     }
     if (PtInRect(&m_header_rc, pt)) {
-        for (int c = 0; c < 3; ++c) {
+        for (int c = 0; c < 7; ++c) {
             if (pt.x >= m_col_x[c] && pt.x < m_col_x[c + 1]) {
                 if (m_sort_col == c) m_sort_asc = !m_sort_asc;
                 else { m_sort_col = c; m_sort_asc = true; }
@@ -859,7 +881,7 @@ void activity_window::paint_artists(HDC dc, const RECT& rc, int x, int right, in
     }
 
     // Reserve room for the scrollbar when the table is longer than the panel.
-    const int split_x = x + (right - x) * 56 / 100;
+    const int split_x = x + (right - x) * 70 / 100; // table 70%, similar artists 30%
     m_similar_rc = { split_x, y, right, rc.bottom - pad };
     const int table_right = split_x - MulDiv(8, dpi, 96);
     const int sb_width = MulDiv(12, dpi, 96), sb_gap = MulDiv(2, dpi, 96);
@@ -869,17 +891,33 @@ void activity_window::paint_artists(HDC dc, const RECT& rc, int x, int right, in
     const bool need_sb = m_order.size() > fit_rows;
     const int cols_right = need_sb ? table_right - sb_width - sb_gap : table_right;
 
-    // Columns: Name | Country | MBID
+    // Columns: Name | Type | Country | Area | Begin | End | MBID. The others take their natural
+    // width (or less when the table is narrow, never leaving Name under ~28%); Name gets the rest.
     const int table_width = (std::max)(0, cols_right - x);
-    const int natural_mbid_w = text_width(dc, L"00000000-0000-0000-0000-000000000000") + gap;
-    const int natural_country_w = text_width(dc, L"Country") + 2 * gap;
-    const int mbid_w = (std::min)(natural_mbid_w, (std::max)(1, table_width / 3));
-    const int country_w = (std::min)(natural_country_w, (std::max)(1, table_width / 4));
-    const int name_w = (std::max)(1, table_width - mbid_w - country_w);
+    const wchar_t* const col_names[7] = { L"Name", L"Type", L"Country", L"Area", L"Begin", L"End", L"MBID" };
+    int natural[7] = {};
+    natural[1] = (std::max)(text_width(dc, L"Orchestra"), text_width(dc, L"Type") + gap) + gap;
+    natural[2] = text_width(dc, L"Country") + 2 * gap;
+    natural[3] = text_width(dc, L"United Kingdom") + gap;
+    natural[4] = (std::max)(text_width(dc, L"0000"), text_width(dc, L"Begin") + gap) + gap;
+    natural[5] = (std::max)(text_width(dc, L"0000"), text_width(dc, L"End") + gap) + gap;
+    natural[6] = text_width(dc, L"00000000-0000-0000-0000-000000000000") + gap;
+    int others = 0;
+    for (int c = 1; c < 7; ++c) others += natural[c];
+    const int name_min = table_width * 28 / 100;
+    int widths[7] = {};
+    if (others > table_width - name_min) {
+        const int room = (std::max)(0, table_width - name_min);
+        for (int c = 1; c < 7; ++c) widths[c] = others > 0 ? static_cast<int>(static_cast<long long>(natural[c]) * room / others) : 0;
+    } else {
+        for (int c = 1; c < 7; ++c) widths[c] = natural[c];
+    }
+    int used = 0;
+    for (int c = 1; c < 7; ++c) used += widths[c];
+    widths[0] = (std::max)(1, table_width - used);
     m_col_x[0] = x;
-    m_col_x[1] = x + name_w;
-    m_col_x[2] = m_col_x[1] + country_w;
-    m_col_x[3] = cols_right;
+    for (int c = 0; c < 7; ++c) m_col_x[c + 1] = m_col_x[c] + widths[c];
+    m_col_x[7] = cols_right;
 
     // Header (click to sort)
     m_header_rc = { x, y, cols_right, y + line_h };
@@ -887,10 +925,9 @@ void activity_window::paint_artists(HDC dc, const RECT& rc, int x, int right, in
         HBRUSH hb = CreateSolidBrush(mix(m_fg, m_bg, 10));
         FillRect(dc, &m_header_rc, hb);
         DeleteObject(hb);
-        const wchar_t* names[3] = { L"Name", L"Country", L"MBID" };
         SelectObject(dc, m_bold ? m_bold : m_font);
-        for (int c = 0; c < 3; ++c) {
-            std::wstring label = names[c];
+        for (int c = 0; c < 7; ++c) {
+            std::wstring label = col_names[c];
             if (m_sort_col == c) label += m_sort_asc ? L" \u25B2" : L" \u25BC";
             draw_text(dc, m_col_x[c] + gap / 2, y, m_col_x[c + 1], line_h, label, m_sort_col == c ? m_accent : m_fg);
         }
@@ -928,9 +965,12 @@ void activity_window::paint_artists(HDC dc, const RECT& rc, int x, int right, in
             FillRect(dc, &row, sb);
             DeleteObject(sb);
         }
-        draw_text(dc, m_col_x[0] + gap / 2, ry, m_col_x[1], line_h, widen(a.name), m_fg);
-        draw_text(dc, m_col_x[1] + gap / 2, ry, m_col_x[2], line_h, widen(a.country), selected ? m_fg : m_dim);
-        draw_text(dc, m_col_x[2] + gap / 2, ry, m_col_x[3], line_h, widen(a.mbid), selected ? m_fg : m_dim);
+        // Begin and End are stored as YYYY[-MM[-DD]]; the table shows the year only.
+        const std::string begin_year = a.begin.substr(0, a.begin.find('-'));
+        const std::string end_year = a.end.substr(0, a.end.find('-'));
+        const std::string* cells[7] = { &a.name, &a.type, &a.country, &a.area, &begin_year, &end_year, &a.mbid };
+        for (int c = 0; c < 7; ++c)
+            draw_text(dc, m_col_x[c] + gap / 2, ry, m_col_x[c + 1], line_h, widen(*cells[c]), c == 0 || selected ? m_fg : m_dim);
         if (focused && static_cast<long long>(pos) == m_focus) DrawFocusRect(dc, &row);
     }
     if (need_sb)
@@ -946,7 +986,7 @@ void activity_window::create_search() {
         reinterpret_cast<HINSTANCE>(GetWindowLongPtr(GWLP_HINSTANCE)), nullptr);
     m_search.Attach(h);
     if (h && m_font) m_search.SetFont(m_font);
-    if (h) SendMessageW(h, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"Filter by name, country or MBID"));
+    if (h) SendMessageW(h, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"Search"));
 }
 
 void activity_window::position_search(const RECT& r) {
@@ -955,6 +995,33 @@ void activity_window::position_search(const RECT& r) {
     m_search_applied = r;
     m_search.SetWindowPos(nullptr, r.left, r.top, r.right - r.left, r.bottom - r.top,
         SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+
+    // The grey hint (shown while the box is empty, also when it has focus) lists what can be
+    // typed. Use the longest version that fits the box, down to a plain "Search".
+    static const wchar_t* const hints[] = {
+        L"Search: name, alias, country (ES, spain), area:  genre:  tag:  type:  mbid:",
+        L"name, alias, country (ES, spain), area: genre: tag:",
+        L"name, alias, country, genre: tag:",
+        L"name, alias, country",
+        L"Search",
+    };
+    const int count = static_cast<int>(sizeof(hints) / sizeof(hints[0]));
+    const int available = (r.right - r.left) - 2 * ::GetSystemMetrics(SM_CXEDGE) - 8;
+    int pick = count - 1;
+    if (HDC dc = m_search.GetDC()) {
+        HGDIOBJ old_font = ::SelectObject(dc, reinterpret_cast<HGDIOBJ>(m_search.GetFont()));
+        for (int i = 0; i < count; ++i) {
+            SIZE size = {};
+            ::GetTextExtentPoint32W(dc, hints[i], static_cast<int>(wcslen(hints[i])), &size);
+            if (size.cx <= available) { pick = i; break; }
+        }
+        ::SelectObject(dc, old_font);
+        m_search.ReleaseDC(dc);
+    }
+    if (pick != m_search_cue) {
+        m_search_cue = pick;
+        ::SendMessageW(m_search, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(hints[pick]));
+    }
 }
 
 LRESULT activity_window::OnCommand(UINT, WPARAM wp, LPARAM lp, BOOL& handled) {
@@ -964,9 +1031,11 @@ LRESULT activity_window::OnCommand(UINT, WPARAM wp, LPARAM lp, BOOL& handled) {
         ::GetWindowTextW(m_search, &text[0], len + 1);
         text.resize(static_cast<size_t>(len));
         std::string f = narrow(text);
-        for (auto& c : f) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        while (!f.empty() && std::isspace(static_cast<unsigned char>(f.back()))) f.pop_back();
+        while (!f.empty() && std::isspace(static_cast<unsigned char>(f.front()))) f.erase(f.begin());
         if (f != m_filter) {
             m_filter = f;
+            m_query = mbdb_search::parse_query(f);
             m_ascroll = 0;
             sort_artists();
             Invalidate(FALSE);

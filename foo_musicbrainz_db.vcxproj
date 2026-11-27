@@ -88,6 +88,8 @@
   <ItemDefinitionGroup Condition="'$(Configuration)'=='Release'">
     <ClCompile>
       <PreprocessorDefinitions>NDEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions Condition="'$(Configuration)|$(Platform)'=='Release|x64'">/utf-8 %(AdditionalOptions)</AdditionalOptions>
+      <AdditionalOptions Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">/utf-8 %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
   </ItemDefinitionGroup>
   <ItemGroup>
@@ -113,7 +115,7 @@
     <ClCompile Include="src\artist_table.cpp" />
     <ClCompile Include="src\bg_tasks.cpp" />
     <ClCompile Include="src\contextmenu.cpp" />
-	<ClCompile Include="src\activity_webview.cpp" />
+    <ClCompile Include="src\activity_webview.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="src\preferences.rc" />
@@ -121,10 +123,11 @@
   <ItemGroup>
     <ClInclude Include="src\preferences.h" />
     <ClInclude Include="include\listenbrainz_similar_artists.h" />
+    <ClInclude Include="src\artist_search.h" />
     <ClInclude Include="src\wininet_http.h" />
     <ClInclude Include="src\artist_info_window.h" />
     <ClInclude Include="src\resource.h" />
-	<ClInclude Include="src\activity_webview.h" />
+    <ClInclude Include="src\activity_webview.h" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\columns_ui-sdk\columns_ui-sdk-public.vcxproj">

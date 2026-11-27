@@ -8,6 +8,7 @@
 #include "../include/musicbrainz_db_types.h"
 #include "activity_webview.h"
 #include "listenbrainz_similar_artists.h"
+#include "artist_search.h"
 
 // Result of a background "list artists" request, polled by the window's timer.
 struct activity_reload_state {
@@ -238,15 +239,17 @@ private:
     uint64_t m_rows_revision = 0;
     bool m_rows_loaded = false;
     std::shared_ptr<activity_reload_state> m_reload; // request in flight, if any
-    std::vector<std::string> m_haystack;    // lowercase "name\ncountry\nmbid" per row, for the filter
-    std::string m_filter;                   // lowercase search text
+    std::vector<mbdb_search::row> m_haystack; // per row: folded name, aliases, ... for the search
+    mbdb_search::query m_query;             // the search text, parsed (see artist_search.h)
+    std::string m_filter;                   // search text as typed (trimmed)
     CWindow m_search;                       // EDIT control (artists tab)
     RECT m_search_applied = {};
+    int m_search_cue = -1;                  // which grey hint text the search box shows (see position_search)
     HBRUSH m_edit_brush = nullptr;
     COLORREF m_edit_bg = 0;
     HFONT m_search_font_applied = nullptr;
     size_t m_ascroll = 0, m_amax_scroll = 0, m_visible_rows = 0;
-    int m_sort_col = 0;                     // 0 name, 1 country, 2 mbid
+    int m_sort_col = 0;                     // 0 name, 1 type, 2 country, 3 area, 4 begin, 5 end, 6 mbid
     bool m_sort_asc = true;
     long long m_focus = -1, m_anchor = -1;  // display positions
     RECT m_tab[4] = {}, m_header_rc = {}, m_list_rc = {}, m_similar_rc = {};
@@ -260,7 +263,7 @@ private:
     RECT m_similar_sb_track = {}, m_similar_sb_thumb = {};
     int m_similar_sb_grab = 0;
     bool m_similar_sb_dragging = false;
-    int m_col_x[4] = {};
+    int m_col_x[8] = {};                    // left edges of the 7 table columns + the right edge
     int m_row_h = 0;
     bool m_batch_was_visible = false; // so the timer repaints once more when the bar hides
 	
